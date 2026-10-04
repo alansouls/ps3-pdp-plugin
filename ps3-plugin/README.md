@@ -46,23 +46,42 @@ make -C vsh
 
 ## Debugging
 
-Both plugins append to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
-`http://<ps3-ip>/dev_hdd0/tmp/riffmaster.log`. A healthy run looks like this:
+Both plugins write to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
+`http://<ps3-ip>/dev_hdd0/tmp/riffmaster.log`.
+
+- **One log per boot.** When the loader starts within 90 s of power-on, it moves the previous
+  log to `riffmaster.old.log` and starts a fresh one. After a freeze and a hard power-off, the
+  log for the run that froze is in **`riffmaster.old.log`**.
+- **Survives power loss.** Each line is `fsync`ed before the plugin moves on. The last line in
+  the log is the last thing the plugin finished before the console died.
+- **Size limit.** Once the log reaches 1 MB it is emptied and restarted with a
+  `log reached size limit` marker, so the newest lines are kept.
+- **Line format.** `[uptime s.us] loader|game t<thread id>: message`.
+- **Heartbeats.** The loader logs once a second for 90 s after injecting. The game plugin logs
+  its counters every 2 s for the first minute, then every 15 s. When both stop at the same
+  time, the whole console froze. When only the game heartbeat stops, the game process died.
+- Hot paths are rate-limited. The game hooks log their first 5 calls, then every 1000th. USB
+  reports log the first 8 as hex dumps, then the first 300 button changes, then every 100th.
+
+A healthy run looks roughly like this:
 
 ```
-riffmaster_loader started
-injected into pid 0x...
-load result 0x00000000
-riffmaster_game started
-profile: gh (0x12BA:0x0100)
-hooked nid 0x3aaad464 ... (one line per hooked function)
-imports patched 0x00000004
-cellUsbdRegisterExtraLdd2 0x00000000
-probe ok, dev 0x...
-attach, SET_CONFIGURATION 0x00000000
-interrupt pipe 0x...
-cellPadLddRegisterController 0x...
-virtual pad port 0x...
+=== new boot, riffmaster_loader starting ... ===
+process list changed: ...                      (each pid and name)
+game process found: pid 0x..., waiting 8s before injecting
+calling ps3mapi_load_proc_module(pid 0x..., /dev_hdd0/plugins/riffmaster_game.sprx)...
+riff_start: module_start in pid 0x...
+ps3mapi_load_proc_module returned 0 (0x0)
+riffmaster_game thread started
+profile: gh (0x12ba:0x0100)
+reading ELF header at 0x00010000... (phdrs, lib stubs, every sys_io import)
+hooking nid 0x3aaad464 ... / write_u32 ... / readback ...
+imports patched: 4 of 4
+cellUsbdRegisterExtraLdd2 returned 0x0
+probe: dev N ... attach: dev N ... set_config_done ... interrupt pipe N
+report #0 ... (hex dump)
+registering virtual pad ... virtual pad port N
+heartbeat: ...
 ```
 
 ## Needs verifying on hardware

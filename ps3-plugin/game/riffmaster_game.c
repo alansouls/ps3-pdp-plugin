@@ -23,6 +23,7 @@
 #include <cell/usbd.h>
 #include <cell/cell_fs.h>
 
+#define RIFF_LOG_TAG "game"
 #include "../common/util.h"
 
 #ifndef USB_CLASS_HID
@@ -111,6 +112,11 @@ static uint8_t *g_buf;  /* from cellUsbdAllocateMemory (DMA-able) */
 
 static sys_ppu_thread_t g_thread;
 
+/* Counters for the heartbeat and for rate-limiting logs on hot paths. */
+static uint32_t g_n_read_done, g_n_read_err, g_n_submit_err, g_n_bad_report;
+static uint32_t g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err;
+static uint32_t g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data;
+
 static int32_t ldd_port(void)
 {
 	return g_ldd >= 0 ? cellPadLddGetPortNo(g_ldd) : -1;
@@ -181,8 +187,17 @@ static void submit_read(void);
 
 static void handle_report(const uint8_t *r, int32_t len)
 {
-	if (len < RM_OFF_FRETS + 1 || r[0] != RM_REPORT_ID)
+	if (len < RM_OFF_FRETS + 1 || r[0] != RM_REPORT_ID) {
+		if (rm_log_every(&g_n_bad_report, 5, 500)) {
+			rm_logf("ignored report #%u: len %d, id 0x%02x", g_n_bad_report, len, len > 0 ? r[0] : 0);
+			rm_log_hex("  bad report", r, len > 0 ? (size_t)len : 0);
+		}
 		return;
+	}
+	if (rm_log_every(&g_n_reports, 8, 0)) {
+		rm_logf("report #%u, len %d", g_n_reports, len);
+		rm_log_hex("  report", r, (size_t)len);
+	}
 
 	sys_lwmutex_lock(&g_lock, 0);
 	rm_state_t prev = g_state;
@@ -202,89 +217,140 @@ static void handle_report(const uint8_t *r, int32_t len)
 	rm_state_t snap = g_state;
 	sys_lwmutex_unlock(&g_lock);
 
+	/* Analog jitter is skipped here so the log tracks button presses. */
+	bool digital = prev.frets != snap.frets || prev.hat != snap.hat ||
+	               prev.btn6 != snap.btn6 || prev.tilted != snap.tilted;
+	if (digital && rm_log_every(&g_n_changes, 300, 100))
+		rm_logf("state #%u: frets 0x%02x hat %x btn6 0x%02x whammy 0x%02x tilt 0x%02x tilted %d",
+		        g_n_changes, snap.frets, snap.hat, snap.btn6, snap.whammy, snap.tilt, snap.tilted);
+
 	if (g_ldd < 0) {
+		rm_logf("registering virtual pad: cellPadLddRegisterController()...");
 		g_ldd = cellPadLddRegisterController();
-		rm_logx("cellPadLddRegisterController", g_ldd);
+		rm_logf("cellPadLddRegisterController returned 0x%x", g_ldd);
 		if (g_ldd < 0) return;
-		rm_logx("virtual pad port", ldd_port());
+		rm_logf("virtual pad port %d", ldd_port());
 		changed = true;
 	}
 	if (changed) {
 		CellPadData data;
 		build_pad_data(&snap, &data);
-		cellPadLddDataInsert(g_ldd, &data);
+		int32_t ins = cellPadLddDataInsert(g_ldd, &data);
+		g_n_inserts++;
+		if (ins != CELL_OK && rm_log_every(&g_n_insert_err, 10, 200))
+			rm_logf("cellPadLddDataInsert failed 0x%x (failure #%u)", ins, g_n_insert_err);
 	}
 }
 
 static void read_done(int32_t result, int32_t count, void *arg)
 {
 	(void)arg;
+	if (rm_log_every(&g_n_read_done, 5, 0))
+		rm_logf("read_done #%u: result 0x%x count %d", g_n_read_done, result, count);
 	if (result == HC_CC_NOERR)
 		handle_report(g_buf, count);
+	else if (rm_log_every(&g_n_read_err, 20, 500))
+		rm_logf("interrupt read error 0x%x count %d (error #%u)", result, count, g_n_read_err);
 	if (g_running && g_intr_pipe >= 0)
 		submit_read();
+	else if (rm_log_every(&g_n_submit_err, 5, 500))
+		rm_logf("not resubmitting read: running %d pipe %d", g_running, g_intr_pipe);
 }
 
 static void submit_read(void)
 {
 	int32_t r = cellUsbdInterruptTransfer(g_intr_pipe, g_buf, RM_REPORT_SIZE, read_done, NULL);
-	if (r != CELL_OK)
-		rm_logx("cellUsbdInterruptTransfer failed", r);
+	if (r != CELL_OK && rm_log_every(&g_n_submit_err, 20, 500))
+		rm_logf("cellUsbdInterruptTransfer failed 0x%x (failure #%u)", r, g_n_submit_err);
 }
 
 static void set_config_done(int32_t result, int32_t count, void *arg)
 {
-	(void)count; (void)arg;
+	(void)arg;
+	rm_logf("set_config_done: result 0x%x count %d", result, count);
 	if (result != HC_CC_NOERR) {
-		rm_logx("SET_CONFIGURATION failed", result);
+		rm_logf("SET_CONFIGURATION failed 0x%x", result);
 		return;
 	}
+	rm_logf("opening interrupt pipe: dev %d ep %p", g_dev_id, g_intr_ep);
 	g_intr_pipe = cellUsbdOpenPipe(g_dev_id, g_intr_ep);
-	rm_logx("interrupt pipe", g_intr_pipe);
-	if (g_intr_pipe >= 0)
+	rm_logf("interrupt pipe %d", g_intr_pipe);
+	if (g_intr_pipe >= 0) {
+		rm_logf("submitting first interrupt read (%d bytes into %p)", RM_REPORT_SIZE, g_buf);
 		submit_read();
+	}
+}
+
+/* Raw descriptors start with bLength, so they can be dumped without knowing their type. */
+static void log_descriptor(const char *label, const void *desc)
+{
+	if (desc == NULL) {
+		rm_logf("%s: (none)", label);
+		return;
+	}
+	rm_log_hex(label, desc, ((const uint8_t *)desc)[0]);
 }
 
 /* First interrupt-IN endpoint of the first HID interface, or NULL. */
-static UsbEndpointDescriptor *find_hid_in_endpoint(int32_t dev_id)
+static UsbEndpointDescriptor *find_hid_in_endpoint(int32_t dev_id, bool verbose)
 {
 	UsbInterfaceDescriptor *ifd = NULL;
 	while ((ifd = (UsbInterfaceDescriptor *)cellUsbdScanStaticDescriptor(
 	            dev_id, ifd, USB_DESCRIPTOR_TYPE_INTERFACE)) != NULL) {
+		if (verbose) {
+			rm_logf("  interface %p class 0x%02x", ifd, ifd->bInterfaceClass);
+			log_descriptor("    interface desc", ifd);
+		}
 		if (ifd->bInterfaceClass != USB_CLASS_HID)
 			continue;
 		void *p = ifd;
 		UsbEndpointDescriptor *ep;
 		while ((ep = (UsbEndpointDescriptor *)cellUsbdScanStaticDescriptor(
 		            dev_id, p, USB_DESCRIPTOR_TYPE_ENDPOINT)) != NULL) {
-			if ((ep->bEndpointAddress & 0x80) && (ep->bmAttributes & 0x03) == 0x03)
+			if (verbose)
+				rm_logf("    endpoint %p addr 0x%02x attr 0x%02x", ep, ep->bEndpointAddress, ep->bmAttributes);
+			if ((ep->bEndpointAddress & 0x80) && (ep->bmAttributes & 0x03) == 0x03) {
+				if (verbose) rm_logf("    -> using this interrupt IN endpoint");
 				return ep;
+			}
 			p = ep;
 		}
 	}
+	if (verbose) rm_logf("  no HID interrupt IN endpoint found");
 	return NULL;
 }
 
 static int rm_probe(int32_t dev_id)
 {
-	if (find_hid_in_endpoint(dev_id) == NULL)
+	rm_logf("probe: dev %d", dev_id);
+	log_descriptor("  device desc", cellUsbdScanStaticDescriptor(dev_id, NULL, USB_DESCRIPTOR_TYPE_DEVICE));
+	if (find_hid_in_endpoint(dev_id, true) == NULL) {
+		rm_logf("probe: dev %d rejected", dev_id);
 		return CELL_USBD_PROBE_FAILED;
-	rm_logx("probe ok, dev", dev_id);
+	}
+	rm_logf("probe: dev %d accepted", dev_id);
 	return CELL_USBD_PROBE_SUCCEEDED;
 }
 
 static int rm_attach(int32_t dev_id)
 {
+	rm_logf("attach: dev %d", dev_id);
 	UsbConfigurationDescriptor *cfg = (UsbConfigurationDescriptor *)
 		cellUsbdScanStaticDescriptor(dev_id, NULL, USB_DESCRIPTOR_TYPE_CONFIGURATION);
-	g_intr_ep = find_hid_in_endpoint(dev_id);
-	if (cfg == NULL || g_intr_ep == NULL)
+	log_descriptor("  config desc", cfg);
+	g_intr_ep = find_hid_in_endpoint(dev_id, false);
+	rm_logf("  interrupt endpoint %p", g_intr_ep);
+	if (cfg == NULL || g_intr_ep == NULL) {
+		rm_logf("attach failed: missing config or endpoint descriptor");
 		return CELL_USBD_ATTACH_FAILED;
+	}
 
 	if (g_buf == NULL) {
 		void *mem = NULL;
-		if (cellUsbdAllocateMemory(&mem, RM_REPORT_SIZE) != CELL_OK || mem == NULL) {
-			rm_log("cellUsbdAllocateMemory failed");
+		int32_t r = cellUsbdAllocateMemory(&mem, RM_REPORT_SIZE);
+		rm_logf("  cellUsbdAllocateMemory(%d) returned 0x%x, mem %p", RM_REPORT_SIZE, r, mem);
+		if (r != CELL_OK || mem == NULL) {
+			rm_logf("attach failed: cellUsbdAllocateMemory");
 			return CELL_USBD_ATTACH_FAILED;
 		}
 		g_buf = (uint8_t *)mem;
@@ -292,23 +358,26 @@ static int rm_attach(int32_t dev_id)
 
 	g_dev_id = dev_id;
 	g_ctrl_pipe = cellUsbdOpenPipe(dev_id, NULL);
+	rm_logf("  control pipe %d", g_ctrl_pipe);
 	if (g_ctrl_pipe < 0) {
-		rm_logx("control pipe failed", g_ctrl_pipe);
+		rm_logf("attach failed: control pipe 0x%x", g_ctrl_pipe);
 		return CELL_USBD_ATTACH_FAILED;
 	}
+	rm_logf("  SET_CONFIGURATION %d...", cfg->bConfigurationValue);
 	int32_t r = cellUsbdSetConfiguration(g_ctrl_pipe, cfg->bConfigurationValue, set_config_done, NULL);
-	rm_logx("attach, SET_CONFIGURATION", r);
+	rm_logf("  cellUsbdSetConfiguration returned 0x%x", r);
 	return r == CELL_OK ? CELL_USBD_ATTACH_SUCCEEDED : CELL_USBD_ATTACH_FAILED;
 }
 
 static int rm_detach(int32_t dev_id)
 {
-	rm_logx("detach, dev", dev_id);
+	rm_logf("detach: dev %d (intr pipe %d, ctrl pipe %d, ldd %d)", dev_id, g_intr_pipe, g_ctrl_pipe, g_ldd);
 	if (g_intr_pipe >= 0) cellUsbdClosePipe(g_intr_pipe);
 	if (g_ctrl_pipe >= 0) cellUsbdClosePipe(g_ctrl_pipe);
 	g_intr_pipe = g_ctrl_pipe = g_dev_id = -1;
 	if (g_ldd >= 0) {
-		cellPadLddUnregisterController(g_ldd);
+		int32_t r = cellPadLddUnregisterController(g_ldd);
+		rm_logf("  cellPadLddUnregisterController returned 0x%x", r);
 		g_ldd = -1;
 	}
 	return CELL_USBD_DETACH_SUCCEEDED;
@@ -348,10 +417,18 @@ typedef struct {
 typedef int32_t (*pad_get_info_fn)(CellPadInfo *info);
 static uint32_t g_orig_get_info;  /* set by patch_imports */
 
+/* Hooks run on the game's threads every frame: log the first calls, then every 1000th. */
+#define HOOK_LOG_FIRST 5
+#define HOOK_LOG_EVERY 1000
+
 static int32_t hook_GetInfo(CellPadInfo *info)
 {
+	bool log = rm_log_every(&g_n_get_info, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
+	if (log) rm_logf("hook_GetInfo #%u: info %p, calling original OPD 0x%08x", g_n_get_info, info, g_orig_get_info);
 	int32_t r = ((pad_get_info_fn)g_orig_get_info)(info);
 	int32_t port = ldd_port();
+	if (log) rm_logf("hook_GetInfo #%u: r 0x%x, now_connect %u, ldd port %d", g_n_get_info, r,
+	                 r == CELL_OK ? info->now_connect : 0, port);
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->vendor_id[port]  = g_profile->vid;
 		info->product_id[port] = g_profile->pid;
@@ -361,8 +438,12 @@ static int32_t hook_GetInfo(CellPadInfo *info)
 
 static int32_t hook_GetInfo2(CellPadInfo2 *info)
 {
+	bool log = rm_log_every(&g_n_get_info2, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
+	if (log) rm_logf("hook_GetInfo2 #%u: info %p", g_n_get_info2, info);
 	int32_t r = cellPadGetInfo2(info);
 	int32_t port = ldd_port();
+	if (log) rm_logf("hook_GetInfo2 #%u: r 0x%x, now_connect %u, ldd port %d", g_n_get_info2, r,
+	                 r == CELL_OK ? info->now_connect : 0, port);
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->device_type[port]       = CELL_PAD_DEV_TYPE_STANDARD;
 		info->device_capability[port] = GUITAR_CAPABILITY;
@@ -372,8 +453,12 @@ static int32_t hook_GetInfo2(CellPadInfo2 *info)
 
 static int32_t hook_PeriphGetInfo(CellPadPeriphInfo *info)
 {
+	bool log = rm_log_every(&g_n_periph_info, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
+	if (log) rm_logf("hook_PeriphGetInfo #%u: info %p", g_n_periph_info, info);
 	int32_t r = cellPadPeriphGetInfo(info);
 	int32_t port = ldd_port();
+	if (log) rm_logf("hook_PeriphGetInfo #%u: r 0x%x, now_connect %u, ldd port %d", g_n_periph_info, r,
+	                 r == CELL_OK ? info->now_connect : 0, port);
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->device_type[port]       = CELL_PAD_DEV_TYPE_STANDARD;
 		info->device_capability[port] = GUITAR_CAPABILITY;
@@ -385,6 +470,9 @@ static int32_t hook_PeriphGetInfo(CellPadPeriphInfo *info)
 
 static int32_t hook_PeriphGetData(uint32_t port_no, CellPadPeriphData *data)
 {
+	bool log = rm_log_every(&g_n_periph_data, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
+	if (log) rm_logf("hook_PeriphGetData #%u: port %u, ldd port %d, data %p",
+	                 g_n_periph_data, port_no, ldd_port(), data);
 	if ((int32_t)port_no != ldd_port())
 		return cellPadPeriphGetData(port_no, data);
 
@@ -472,28 +560,50 @@ static import_hook_t g_hooks[] = {
 
 static void write_u32(uint32_t addr, uint32_t value)
 {
-	if (ps3mapi_set_proc_mem(sys_process_getpid(), addr, &value, sizeof(value)) != 0)
+	uint32_t pid = sys_process_getpid();
+	rm_logf("  write_u32 0x%08x <- 0x%08x (was 0x%08x), ps3mapi_set_proc_mem pid 0x%x...",
+	        addr, value, *(volatile uint32_t *)addr, pid);
+	int r = ps3mapi_set_proc_mem(pid, addr, &value, sizeof(value));
+	rm_logf("  ps3mapi_set_proc_mem returned %d (0x%x)", r, r);
+	if (r != 0) {
+		rm_logf("  falling back to a direct store (faults if the page is read-only)...");
 		*(volatile uint32_t *)addr = value;
+	}
+	rm_logf("  readback 0x%08x%s", *(volatile uint32_t *)addr,
+	        *(volatile uint32_t *)addr == value ? "" : "  <- MISMATCH");
 }
 
 static const proc_prx_info_t *find_prx_info(void)
 {
 	const uint8_t *elf = (const uint8_t *)EXEC_BASE;
-	if (elf[0] != 0x7F || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F')
+	rm_logf("reading ELF header at 0x%08x...", EXEC_BASE);
+	rm_log_hex("  elf header", elf, 0x40);
+	if (elf[0] != 0x7F || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') {
+		rm_logf("no ELF magic at 0x%08x", EXEC_BASE);
 		return NULL;
+	}
 
 	uint64_t phoff     = *(const uint64_t *)(elf + 0x20);
 	uint16_t phentsize = *(const uint16_t *)(elf + 0x36);
 	uint16_t phnum     = *(const uint16_t *)(elf + 0x38);
+	rm_logf("phoff 0x%llx phentsize %u phnum %u", (unsigned long long)phoff, phentsize, phnum);
 
 	for (uint16_t i = 0; i < phnum; i++) {
 		const uint8_t *ph = elf + phoff + (uint32_t)i * phentsize;
 		uint32_t type  = *(const uint32_t *)ph;
 		uint64_t vaddr = *(const uint64_t *)(ph + 0x10);
+		uint64_t memsz = *(const uint64_t *)(ph + 0x28);
+		rm_logf("  phdr %u: type 0x%08x vaddr 0x%llx memsz 0x%llx", i, type,
+		        (unsigned long long)vaddr, (unsigned long long)memsz);
 		if ((type == 0x60000001 || type == 0x60000002) && vaddr) {
 			const proc_prx_info_t *info = (const proc_prx_info_t *)(uint32_t)vaddr;
-			if (info->magic == PRX_INFO_MAGIC)
+			rm_logf("  candidate prx info at %p: magic 0x%08x", info, info->magic);
+			if (info->magic == PRX_INFO_MAGIC) {
+				rm_logf("  prx info: sdk 0x%08x libent 0x%08x-0x%08x libstub 0x%08x-0x%08x",
+				        info->sdk_version, info->libent_start, info->libent_end,
+				        info->libstub_start, info->libstub_end);
 				return info;
+			}
 		}
 	}
 	return NULL;
@@ -503,34 +613,44 @@ static int patch_imports(void)
 {
 	const proc_prx_info_t *info = find_prx_info();
 	if (info == NULL) {
-		rm_log("prx info not found in executable");
+		rm_logf("prx info not found in executable");
 		return 0;
 	}
 
 	int patched = 0;
 	for (uint32_t p = info->libstub_start; p < info->libstub_end; ) {
 		const lib_stub_t *stub = (const lib_stub_t *)p;
-		if (stub->size == 0) break;
+		if (stub->size == 0) {
+			rm_logf("  stub at 0x%08x has size 0, stopping", p);
+			break;
+		}
 		const char *mod = (const char *)stub->module_name;
+		rm_logf("  stub 0x%08x size 0x%02x funcs %u vars %u module '%.40s'",
+		        p, stub->size, stub->num_func, stub->num_var, mod ? mod : "(null)");
 		if (mod && mod[0] == 's' && mod[1] == 'y' && mod[2] == 's' && mod[3] == '_' &&
 		    mod[4] == 'i' && mod[5] == 'o' && mod[6] == '\0') {
 			const uint32_t *nids  = (const uint32_t *)stub->func_nid;
 			const uint32_t *slots = (const uint32_t *)stub->func_table;
 			for (uint16_t f = 0; f < stub->num_func; f++) {
+				rm_logf("    sys_io import %u: nid 0x%08x slot %p -> 0x%08x", f, nids[f], &slots[f], slots[f]);
 				for (uint32_t h = 0; h < NUM_HOOKS; h++) {
 					if (nids[f] != g_hooks[h].nid || g_hooks[h].slot) continue;
 					g_hooks[h].slot     = (uint32_t)&slots[f];
 					g_hooks[h].original = slots[f];
 					if (g_hooks[h].hook == (void *)hook_GetInfo)
 						g_orig_get_info = slots[f];
+					rm_logf("    hooking nid 0x%08x: slot 0x%08x original OPD 0x%08x hook OPD %p",
+					        g_hooks[h].nid, g_hooks[h].slot, g_hooks[h].original, g_hooks[h].hook);
 					write_u32(g_hooks[h].slot, (uint32_t)g_hooks[h].hook);
-					rm_logx("hooked nid", g_hooks[h].nid);
 					patched++;
 				}
 			}
 		}
 		p += stub->size;
 	}
+	for (uint32_t h = 0; h < NUM_HOOKS; h++)
+		if (!g_hooks[h].slot)
+			rm_logf("  nid 0x%08x not imported by the game, not hooked", g_hooks[h].nid);
 	return patched;
 }
 
@@ -538,6 +658,7 @@ static void unpatch_imports(void)
 {
 	for (uint32_t h = 0; h < NUM_HOOKS; h++) {
 		if (g_hooks[h].slot) {
+			rm_logf("unhooking nid 0x%08x", g_hooks[h].nid);
 			write_u32(g_hooks[h].slot, g_hooks[h].original);
 			g_hooks[h].slot = 0;
 		}
@@ -570,6 +691,7 @@ static void select_profile(void)
 	static char buf[4096];
 	int n = rm_read_file(CFG_PATH, buf, sizeof(buf));
 	char forced = n > 0 ? read_cfg_profile(buf, n) : 0;
+	rm_logf("%s: read %d bytes, forced profile '%c'", CFG_PATH, n, forced ? forced : '-');
 	if (forced == 'r') {
 		g_profile = &PROFILE_RB;
 	} else if (forced == 'g') {
@@ -577,45 +699,75 @@ static void select_profile(void)
 	} else {
 		/* auto: every Rock Band title has "Rock Band" in its PARAM.SFO TITLE. */
 		n = rm_read_file(SFO_PATH, buf, sizeof(buf));
-		g_profile = (n > 0 && rm_memifind(buf, (size_t)n, "rock band")) ? &PROFILE_RB : &PROFILE_GH;
+		bool rb = n > 0 && rm_memifind(buf, (size_t)n, "rock band");
+		rm_logf("%s: read %d bytes, 'rock band' %s", SFO_PATH, n, rb ? "found" : "not found");
+		g_profile = rb ? &PROFILE_RB : &PROFILE_GH;
 	}
-	rm_log(g_profile == &PROFILE_RB ? "profile: rb (0x12BA:0x0200)" : "profile: gh (0x12BA:0x0100)");
+	rm_logf("profile: %s (0x%04x:0x%04x)", g_profile->name, g_profile->vid, g_profile->pid);
 }
 
 /* ------------------------------------------------------------------------ */
 /* Module entry points                                                       */
 /* ------------------------------------------------------------------------ */
 
+/* Logged by the heartbeat so a freeze can be timed against the last line. */
+static void log_stats(void)
+{
+	rm_logf("heartbeat: dev %d intr pipe %d ldd %d port %d | reads %u errs %u submit errs %u bad %u | "
+	        "reports %u changes %u inserts %u insert errs %u | GetInfo %u GetInfo2 %u PeriphInfo %u PeriphData %u",
+	        g_dev_id, g_intr_pipe, g_ldd, ldd_port(), g_n_read_done, g_n_read_err, g_n_submit_err,
+	        g_n_bad_report, g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err,
+	        g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data);
+}
+
 static void riff_thread(uint64_t arg)
 {
 	(void)arg;
-	cellSysmoduleLoadModule(CELL_SYSMODULE_FS);
-	rm_log("riffmaster_game started");
+	rm_logf("riffmaster_game thread started");
 
+	rm_logf("selecting profile...");
 	select_profile();
-	rm_logx("imports patched", patch_imports());
+	rm_logf("patching imports...");
+	rm_logf("imports patched: %d of %d", patch_imports(), (int)NUM_HOOKS);
 
+	rm_logf("cellSysmoduleLoadModule(USBD)...");
 	int32_t r = cellSysmoduleLoadModule(CELL_SYSMODULE_USBD);
-	rm_logx("load USBD module", r);
+	rm_logf("cellSysmoduleLoadModule(USBD) returned 0x%x", r);
+	rm_logf("cellUsbdInit()...");
 	r = cellUsbdInit();
-	if (r != CELL_OK && r != (int32_t)CELL_USBD_ERROR_ALREADY_INITIALIZED)
-		rm_logx("cellUsbdInit failed", r);
+	rm_logf("cellUsbdInit returned 0x%x%s", r,
+	        r == (int32_t)CELL_USBD_ERROR_ALREADY_INITIALIZED ? " (already initialized)" : "");
+	rm_logf("cellUsbdRegisterExtraLdd2(vid 0x%04x, pid 0x%04x-0x%04x)...", RM_VID, RM_PID_MIN, RM_PID_MAX);
 	r = cellUsbdRegisterExtraLdd2(&g_ldd_ops, RM_VID, RM_PID_MIN, RM_PID_MAX);
-	rm_logx("cellUsbdRegisterExtraLdd2", r);
+	rm_logf("cellUsbdRegisterExtraLdd2 returned 0x%x", r);
+	rm_logf("setup done, heartbeat every 2s for 60s, then every 15s");
 
+	/* Heartbeat: shows how long the game process kept running. */
+	uint64_t start = sys_time_get_system_time();
+	uint32_t ticks = 0;
+	while (g_running) {
+		sys_timer_usleep(100 * 1000);
+		ticks++;
+		uint64_t elapsed = (sys_time_get_system_time() - start) / 1000000;
+		if (ticks % (elapsed < 60 ? 20 : 150) == 0)
+			log_stats();
+	}
+	rm_logf("riffmaster_game thread exiting");
 	sys_ppu_thread_exit(0);
 }
 
 int riff_start(size_t args, void *argp)
 {
-	(void)args; (void)argp;
+	rm_logf("riff_start: module_start in pid 0x%x, args %u argp %p", sys_process_getpid(), (unsigned)args, argp);
 	sys_lwmutex_attribute_t attr;
 	sys_lwmutex_attribute_initialize(attr);
-	sys_lwmutex_create(&g_lock, &attr);
+	int r = sys_lwmutex_create(&g_lock, &attr);
+	rm_logf("riff_start: sys_lwmutex_create returned 0x%x", r);
 	g_running = true;
 
-	sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
-	                      SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
+	r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
+	                          SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
+	rm_logf("riff_start: sys_ppu_thread_create returned 0x%x, returning RESIDENT", r);
 	return SYS_PRX_RESIDENT;
 }
 
@@ -623,13 +775,16 @@ int riff_stop(size_t args, void *argp)
 {
 	(void)args; (void)argp;
 	uint64_t exit_code;
+	rm_logf("riff_stop: stopping");
+	log_stats();
 	g_running = false;
 	sys_ppu_thread_join(g_thread, &exit_code);
 
-	cellUsbdUnregisterExtraLdd(&g_ldd_ops);
+	rm_logf("riff_stop: cellUsbdUnregisterExtraLdd returned 0x%x", cellUsbdUnregisterExtraLdd(&g_ldd_ops));
 	if (g_dev_id >= 0) rm_detach(g_dev_id);
 	if (g_buf) { cellUsbdFreeMemory(g_buf); g_buf = NULL; }
 	unpatch_imports();
 	sys_lwmutex_destroy(&g_lock);
+	rm_logf("riff_stop: done");
 	return SYS_PRX_STOP_OK;
 }
