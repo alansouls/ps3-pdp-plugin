@@ -224,8 +224,9 @@ static void build_pad_data(const rm_state_t *s, CellPadData *d)
 
 	if (s->frets & RM_FRET_GREEN)       d2 |= CELL_PAD_CTRL_CROSS;
 	if (s->frets & RM_FRET_RED)         d2 |= CELL_PAD_CTRL_CIRCLE;
-	if (s->frets & RM_FRET_YELLOW)      d2 |= CELL_PAD_CTRL_TRIANGLE;
-	if (s->frets & RM_FRET_BLUE)        d2 |= CELL_PAD_CTRL_SQUARE;
+	/* A PS3 GH guitar reports Yellow as Square and Blue as Triangle (confirmed in GH Metallica). */
+	if (s->frets & RM_FRET_YELLOW)      d2 |= CELL_PAD_CTRL_SQUARE;
+	if (s->frets & RM_FRET_BLUE)        d2 |= CELL_PAD_CTRL_TRIANGLE;
 	if (s->frets & RM_FRET_ORANGE)      d2 |= CELL_PAD_CTRL_L1;
 
 	uint16_t *b = d->button;

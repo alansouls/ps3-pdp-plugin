@@ -47,7 +47,7 @@ VSH plugins reload when you quit a game, so "loader loaded" also appears each ti
 
 | Riffmaster | PS3 guitar |
 | --- | --- |
-| Green / Red / Yellow / Blue / Orange | Cross / Circle / Triangle / Square / L1 |
+| Green / Red / Yellow / Blue / Orange | Cross / Circle / Square / Triangle / L1 |
 | Strum up / down | D-pad up / down |
 | Start / Select | Start / Select |
 | Whammy (byte 44) | Right stick X |
