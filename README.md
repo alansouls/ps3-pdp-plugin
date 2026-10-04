@@ -176,5 +176,5 @@ The license covers this project's own code only. The PS3 SDK is not part of this
 it. The committed `.sprx` files are built with the SDK and contain small parts generated from it, such as the
 import stubs for the system libraries.
 
-"PlayStation", "PS3" and "Guitar Hero", "Rock Band" and "PDP Riffmaster" are trademarks of their respective
+"PlayStation", "PS3", "Guitar Hero", "Rock Band" and "PDP Riffmaster" are trademarks of their respective
 owners. This project is not affiliated with or endorsed by any of them.
