@@ -35,13 +35,27 @@ enum {
 	RIFF_STEP_COUNT
 };
 
+/*
+ * The game plugin's copy starts with this signature (in initialized data), so
+ * the loader can also find and read it straight from the game's memory with
+ * PS3MAPI GET_PROC_MEM. That works even if module_start never got the
+ * loader's argument or can't make syscalls.
+ */
+#define RIFF_STATUS_SIG0 0x52494646  /* "RIFF" */
+#define RIFF_STATUS_SIG1 0x53544154  /* "STAT" */
+
 typedef struct {
+	uint32_t sig[2];   /* RIFF_STATUS_SIG0/1 in the game plugin's copy */
 	uint32_t seq;      /* bumped on every report */
 	uint32_t step;     /* RIFF_STEP_*: the last step reached */
 	int32_t  result;   /* that step's return code */
 	int32_t  log_err;  /* last error opening the log file in the game, 0 if logging works */
 	char     profile;  /* 'g' or 'r' once the profile is selected */
 	char     pad[3];
+	/* For when reports don't reach the loader: */
+	int32_t  report_err;  /* last ps3mapi_set_proc_mem result, 0 if it worked */
+	uint32_t start_args;  /* module_start's args and argp, as received */
+	uint32_t start_argp;
 } riff_status_t;
 
 #endif

@@ -128,7 +128,8 @@ static int32_t ldd_port(void)
 /* ------------------------------------------------------------------------ */
 
 static riff_arg_t    g_arg;     /* from the loader, magic 0 if none was passed */
-static riff_status_t g_status;
+/* Initialized, so it lands in .data where the loader can find the signature. */
+static riff_status_t g_status = { { RIFF_STATUS_SIG0, RIFF_STATUS_SIG1 } };
 
 static void report(uint32_t step, int32_t result)
 {
@@ -140,6 +141,7 @@ static void report(uint32_t step, int32_t result)
 	if (g_arg.magic != RIFF_ARG_MAGIC)
 		return;
 	int r = ps3mapi_set_proc_mem(g_arg.vsh_pid, g_arg.status_addr, &g_status, sizeof(g_status));
+	g_status.report_err = r;
 	rm_logf("report step %u result 0x%x to loader pid 0x%x at 0x%08x: 0x%x",
 	        step, result, g_arg.vsh_pid, g_arg.status_addr, r);
 }
@@ -796,6 +798,8 @@ int riff_start(size_t args, void *argp)
 	 * freed when module_start returns, so keep a copy. It should arrive in argp,
 	 * but accept it in args too in case Cobra passes it as the first parameter.
 	 */
+	g_status.start_args = (uint32_t)args;
+	g_status.start_argp = (uint32_t)argp;
 	const riff_arg_t *a = (const riff_arg_t *)argp;
 	if (a == NULL && args >= 0x10000 && (args & 3) == 0)
 		a = (const riff_arg_t *)args;

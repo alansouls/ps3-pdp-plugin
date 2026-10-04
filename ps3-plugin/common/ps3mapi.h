@@ -9,10 +9,12 @@
 #include <sys/syscall.h>
 
 #define SYSCALL8_OPCODE_PS3MAPI             0x7777
+#define PS3MAPI_OPCODE_GET_PROC_MEM         0x0031
 #define PS3MAPI_OPCODE_SET_PROC_MEM         0x0032
 #define PS3MAPI_OPCODE_GET_ALL_PROC_MODULE_PID 0x0041
 #define PS3MAPI_OPCODE_GET_PROC_MODULE_NAME 0x0042
 #define PS3MAPI_OPCODE_LOAD_PROC_MODULE     0x0044
+#define PS3MAPI_OPCODE_GET_PROC_MODULE_SEGMENTS 0x0048  /* Cobra 8.3+ */
 
 /* Cobra always copies this many module IDs into the list. */
 #define PS3MAPI_MAX_MODULES 128
@@ -22,6 +24,13 @@
  * to detect games: GET_ALL_PROC_PID hung the whole console when called while a
  * game was starting. The loader asks VSH for the game's pid instead.
  */
+
+static inline int ps3mapi_get_proc_mem(uint32_t pid, uint32_t addr, void *buf, uint32_t size)
+{
+	system_call_6(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_PROC_MEM,
+	              (uint64_t)pid, (uint64_t)addr, (uint64_t)(uint32_t)buf, (uint64_t)size);
+	return_to_user_prog(int);
+}
 
 static inline int ps3mapi_set_proc_mem(uint32_t pid, uint32_t addr, const void *buf, uint32_t size)
 {
@@ -43,6 +52,17 @@ static inline int ps3mapi_get_proc_module_name(uint32_t pid, int32_t id, char *n
 {
 	system_call_5(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_PROC_MODULE_NAME,
 	              (uint64_t)pid, (uint64_t)(uint32_t)id, (uint64_t)(uint32_t)name);
+	return_to_user_prog(int);
+}
+
+/*
+ * Fills info->segments with the module's segments. The caller sets info->size,
+ * segments/segments_num and filename/filename_size (sys_prx_module_info_t, sys/prx.h).
+ */
+static inline int ps3mapi_get_proc_module_segments(uint32_t pid, int32_t id, void *info)
+{
+	system_call_5(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_PROC_MODULE_SEGMENTS,
+	              (uint64_t)pid, (uint64_t)(uint32_t)id, (uint64_t)(uint32_t)info);
 	return_to_user_prog(int);
 }
 

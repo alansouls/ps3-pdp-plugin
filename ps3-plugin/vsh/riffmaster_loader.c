@@ -152,7 +152,8 @@ static volatile riff_status_t g_game_status;
 static uint32_t g_seen_seq;
 static uint64_t g_report_deadline;  /* 0 once setup finished or the timeout was reported */
 static uint32_t g_injected_pid;
-static void log_game_modules(uint32_t pid);
+static int32_t log_game_modules(uint32_t pid);
+static void peek_game_status(uint32_t pid, int32_t prx_id);
 
 static const char *const STEP_NAMES[RIFF_STEP_COUNT] = {
 	"none", "module_start", "thread started", "profile selected", "imports hooked",
@@ -193,7 +194,9 @@ static void check_game_status(void)
 	}
 	if (g_report_deadline && uptime_sec() >= g_report_deadline) {
 		g_report_deadline = 0;
-		log_game_modules(g_injected_pid);
+		int32_t prx_id = log_game_modules(g_injected_pid);
+		if (prx_id)
+			peek_game_status(g_injected_pid, prx_id);
 		if (s.seq == 0) {
 			rm_logf("game plugin sent no progress report within %ds of injection", REPORT_TIMEOUT_SEC);
 			notify("Riffmaster: guitar plugin didn't report back");
@@ -273,8 +276,9 @@ static void log_game_plugin_file(void)
  * Logs the modules loaded in the game process, to show whether the game plugin
  * is actually in there. Only runs after injection, when the game is already up.
  */
-static void log_game_modules(uint32_t pid)
+static int32_t log_game_modules(uint32_t pid)
 {
+	int32_t ours_id = 0;
 	static int32_t ids[PS3MAPI_MAX_MODULES];
 	static char name[64];
 	bool found = false;
@@ -283,15 +287,71 @@ static void log_game_modules(uint32_t pid)
 	rm_logf("listing modules in pid 0x%08x: ps3mapi_get_proc_modules...", pid);
 	int r = ps3mapi_get_proc_modules(pid, ids);
 	rm_logf("ps3mapi_get_proc_modules returned 0x%x", r);
-	if (r != 0) return;
+	if (r != 0) return 0;
 	for (int i = 0; i < PS3MAPI_MAX_MODULES && ids[i]; i++) {
 		rm_memset(name, 0, sizeof(name));
 		r = ps3mapi_get_proc_module_name(pid, ids[i], name);
 		bool ours = r == 0 && rm_memifind(name, rm_strlen(name), "riffmaster");
 		found |= ours;
+		if (ours) ours_id = ids[i];
 		rm_logf("  module 0x%08x name_r 0x%x '%s'%s", ids[i], r, name, ours ? "  <- game plugin" : "");
 	}
 	rm_logf("game plugin %s loaded in the game process", found ? "IS" : "is NOT");
+	return ours_id;
+}
+
+/*
+ * Reads the game plugin's own riff_status_t out of the game's memory, found by
+ * its signature in the module's segments. Shows whether module_start ran even
+ * when its reports never arrived.
+ */
+static void peek_game_status(uint32_t pid, int32_t prx_id)
+{
+	static sys_prx_segment_info_t segs[8];
+	static char filename[SYS_PRX_MODULE_FILENAME_SIZE];
+	static uint32_t chunk[1024];
+	sys_prx_module_info_t info;
+
+	rm_memset(&info, 0, sizeof(info));
+	rm_memset(segs, 0, sizeof(segs));
+	info.size = sizeof(info);
+	info.segments = segs;
+	info.segments_num = sizeof(segs) / sizeof(segs[0]);
+	info.filename = filename;
+	info.filename_size = sizeof(filename);
+	rm_logf("reading game plugin segments: ps3mapi_get_proc_module_segments(prx 0x%08x)...", prx_id);
+	int r = ps3mapi_get_proc_module_segments(pid, prx_id, &info);
+	rm_logf("ps3mapi_get_proc_module_segments returned 0x%x", r);
+	if (r != 0) return;
+
+	for (uint32_t s = 0; s < sizeof(segs) / sizeof(segs[0]); s++) {
+		uint32_t base = (uint32_t)segs[s].base, size = (uint32_t)segs[s].memsz;
+		if (size == 0) continue;
+		rm_logf("  segment %u: base 0x%08x memsz 0x%x type %llu", s, base, size,
+		        (unsigned long long)segs[s].type);
+		if (size > 0x40000) size = 0x40000;
+		for (uint32_t off = 0; off < size; off += sizeof(chunk)) {
+			uint32_t n = size - off < sizeof(chunk) ? size - off : sizeof(chunk);
+			if (ps3mapi_get_proc_mem(pid, base + off, chunk, n) != 0) {
+				rm_logf("  read at 0x%08x failed, skipping the rest of this segment", base + off);
+				break;
+			}
+			for (uint32_t i = 0; i + sizeof(riff_status_t) / 4 <= n / 4; i++) {
+				if (chunk[i] != RIFF_STATUS_SIG0 || chunk[i + 1] != RIFF_STATUS_SIG1) continue;
+				/* A match near the end of the chunk may run past it, so read it whole. */
+				riff_status_t st;
+				if (ps3mapi_get_proc_mem(pid, base + off + i * 4, &st, sizeof(st)) != 0) continue;
+				rm_logf("  game plugin status at 0x%08x: seq %u, step %u (%s), result 0x%x, log open error 0x%x,"
+				        " report error 0x%x, module_start args 0x%08x argp 0x%08x",
+				        base + off + i * 4, st.seq, st.step, step_name(st.step), st.result, st.log_err,
+				        st.report_err, st.start_args, st.start_argp);
+				if (st.seq == 0)
+					rm_logf("  -> module_start never ran (or never reached its first report)");
+				return;
+			}
+		}
+	}
+	rm_logf("  game plugin status signature not found in its segments");
 }
 
 static void inject(uint32_t pid)
