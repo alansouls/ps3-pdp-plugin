@@ -11,6 +11,14 @@ The guitar plugs into the PS3 directly over USB.
 | `riffmaster_loader.sprx` | VSH (`boot_plugins.txt`) | Asks VSH for the running game's process ID (`GetGameProcessID`, as webMAN MOD does) and injects the game plugin through Cobra PS3MAPI after 8 s. |
 | `riffmaster_game.sprx` | Game process | Opens the Riffmaster through `cellUsbd`. Converts each report using `../riffmaster_report_map.md`. Feeds a virtual pad through `cellPadLdd`. Redirects the game's `cellPadGetInfo/GetInfo2/PeriphGetInfo/PeriphGetData` imports so that pad reports as a guitar. |
 
+### How the game plugin starts
+
+Cobra runs the game plugin's `module_start` on a thread its kernel code creates. Calls into liblv2 never return on
+that thread (`sys_ppu_thread_get_id`, `sys_ppu_thread_create`), so `module_start` only makes direct syscalls: it
+takes the loader's argument, reports to the loader, and hooks the game's `cellPad` imports (including
+`cellPadGetData`, which games call every frame). The first hooked call runs on one of the game's own threads, and
+that is where the plugin starts `riff_thread`, which does all the logging and USB setup.
+
 ### XMB notifications
 
 | When | Message |

@@ -133,6 +133,7 @@ static int32_t ldd_port(void)
 static riff_arg_t    g_arg;     /* from the loader, magic 0 if none was passed */
 /* Initialized, so it lands in .data where the loader can find the signature. */
 static riff_status_t g_status = { { RIFF_STATUS_SIG0, RIFF_STATUS_SIG1 } };
+static int g_patched;  /* imports hooked by module_start */
 
 /* Copies g_status into the loader's memory. Doesn't log, so it works even if logging is broken. */
 static void push_status(void)
@@ -164,6 +165,15 @@ static void mark(uint32_t line, int32_t result)
 /* Only the first few log lines are probed; each probe costs a PS3MAPI call. */
 #define LOG_PROBE_LINES 3
 static uint32_t g_probed_lines;
+
+/*
+ * module_start runs on a thread created by Cobra's kernel code, where calls into
+ * liblv2 never return (seen on hardware: sys_ppu_thread_get_id inside rm_logf,
+ * then sys_ppu_thread_create). The import patching it does logs through plog,
+ * which stays silent until a real thread exists (see bootstrap()).
+ */
+static volatile bool g_log_ok;
+#define plog(...) do { if (g_log_ok) rm_logf(__VA_ARGS__); } while (0)
 
 static void riff_log_probe(unsigned point)
 {
@@ -476,8 +486,17 @@ static uint32_t g_orig_get_info;  /* set by patch_imports */
 #define HOOK_LOG_FIRST 5
 #define HOOK_LOG_EVERY 1000
 
+static void bootstrap(void);
+
+static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
+{
+	bootstrap();
+	return cellPadGetData(port_no, data);
+}
+
 static int32_t hook_GetInfo(CellPadInfo *info)
 {
+	bootstrap();
 	bool log = rm_log_every(&g_n_get_info, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
 	if (log) rm_logf("hook_GetInfo #%u: info %p, calling original OPD 0x%08x", g_n_get_info, info, g_orig_get_info);
 	int32_t r = ((pad_get_info_fn)g_orig_get_info)(info);
@@ -493,6 +512,7 @@ static int32_t hook_GetInfo(CellPadInfo *info)
 
 static int32_t hook_GetInfo2(CellPadInfo2 *info)
 {
+	bootstrap();
 	bool log = rm_log_every(&g_n_get_info2, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
 	if (log) rm_logf("hook_GetInfo2 #%u: info %p", g_n_get_info2, info);
 	int32_t r = cellPadGetInfo2(info);
@@ -508,6 +528,7 @@ static int32_t hook_GetInfo2(CellPadInfo2 *info)
 
 static int32_t hook_PeriphGetInfo(CellPadPeriphInfo *info)
 {
+	bootstrap();
 	bool log = rm_log_every(&g_n_periph_info, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
 	if (log) rm_logf("hook_PeriphGetInfo #%u: info %p", g_n_periph_info, info);
 	int32_t r = cellPadPeriphGetInfo(info);
@@ -525,6 +546,7 @@ static int32_t hook_PeriphGetInfo(CellPadPeriphInfo *info)
 
 static int32_t hook_PeriphGetData(uint32_t port_no, CellPadPeriphData *data)
 {
+	bootstrap();
 	bool log = rm_log_every(&g_n_periph_data, HOOK_LOG_FIRST, HOOK_LOG_EVERY);
 	if (log) rm_logf("hook_PeriphGetData #%u: port %u, ldd port %d, data %p",
 	                 g_n_periph_data, port_no, ldd_port(), data);
@@ -610,51 +632,52 @@ static import_hook_t g_hooks[] = {
 	{ 0xA703A51D, (void *)hook_GetInfo2,       0, 0 },  /* cellPadGetInfo2 */
 	{ 0x4CC9B68D, (void *)hook_PeriphGetInfo,  0, 0 },  /* cellPadPeriphGetInfo */
 	{ 0x8A00F264, (void *)hook_PeriphGetData,  0, 0 },  /* cellPadPeriphGetData */
+	{ 0x8B72CDA1, (void *)hook_GetData,        0, 0 },  /* cellPadGetData: called every frame, starts riff_thread */
 };
 #define NUM_HOOKS (sizeof(g_hooks) / sizeof(g_hooks[0]))
 
 static void write_u32(uint32_t addr, uint32_t value)
 {
 	uint32_t pid = sys_process_getpid();
-	rm_logf("  write_u32 0x%08x <- 0x%08x (was 0x%08x), ps3mapi_set_proc_mem pid 0x%x...",
+	plog("  write_u32 0x%08x <- 0x%08x (was 0x%08x), ps3mapi_set_proc_mem pid 0x%x...",
 	        addr, value, *(volatile uint32_t *)addr, pid);
 	int r = ps3mapi_set_proc_mem(pid, addr, &value, sizeof(value));
-	rm_logf("  ps3mapi_set_proc_mem returned %d (0x%x)", r, r);
+	plog("  ps3mapi_set_proc_mem returned %d (0x%x)", r, r);
 	if (r != 0) {
-		rm_logf("  falling back to a direct store (faults if the page is read-only)...");
+		plog("  falling back to a direct store (faults if the page is read-only)...");
 		*(volatile uint32_t *)addr = value;
 	}
-	rm_logf("  readback 0x%08x%s", *(volatile uint32_t *)addr,
+	plog("  readback 0x%08x%s", *(volatile uint32_t *)addr,
 	        *(volatile uint32_t *)addr == value ? "" : "  <- MISMATCH");
 }
 
 static const proc_prx_info_t *find_prx_info(void)
 {
 	const uint8_t *elf = (const uint8_t *)EXEC_BASE;
-	rm_logf("reading ELF header at 0x%08x...", EXEC_BASE);
-	rm_log_hex("  elf header", elf, 0x40);
+	plog("reading ELF header at 0x%08x...", EXEC_BASE);
+	if (g_log_ok) rm_log_hex("  elf header", elf, 0x40);
 	if (elf[0] != 0x7F || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') {
-		rm_logf("no ELF magic at 0x%08x", EXEC_BASE);
+		plog("no ELF magic at 0x%08x", EXEC_BASE);
 		return NULL;
 	}
 
 	uint64_t phoff     = *(const uint64_t *)(elf + 0x20);
 	uint16_t phentsize = *(const uint16_t *)(elf + 0x36);
 	uint16_t phnum     = *(const uint16_t *)(elf + 0x38);
-	rm_logf("phoff 0x%llx phentsize %u phnum %u", (unsigned long long)phoff, phentsize, phnum);
+	plog("phoff 0x%llx phentsize %u phnum %u", (unsigned long long)phoff, phentsize, phnum);
 
 	for (uint16_t i = 0; i < phnum; i++) {
 		const uint8_t *ph = elf + phoff + (uint32_t)i * phentsize;
 		uint32_t type  = *(const uint32_t *)ph;
 		uint64_t vaddr = *(const uint64_t *)(ph + 0x10);
 		uint64_t memsz = *(const uint64_t *)(ph + 0x28);
-		rm_logf("  phdr %u: type 0x%08x vaddr 0x%llx memsz 0x%llx", i, type,
+		plog("  phdr %u: type 0x%08x vaddr 0x%llx memsz 0x%llx", i, type,
 		        (unsigned long long)vaddr, (unsigned long long)memsz);
 		if ((type == 0x60000001 || type == 0x60000002) && vaddr) {
 			const proc_prx_info_t *info = (const proc_prx_info_t *)(uint32_t)vaddr;
-			rm_logf("  candidate prx info at %p: magic 0x%08x", info, info->magic);
+			plog("  candidate prx info at %p: magic 0x%08x", info, info->magic);
 			if (info->magic == PRX_INFO_MAGIC) {
-				rm_logf("  prx info: sdk 0x%08x libent 0x%08x-0x%08x libstub 0x%08x-0x%08x",
+				plog("  prx info: sdk 0x%08x libent 0x%08x-0x%08x libstub 0x%08x-0x%08x",
 				        info->sdk_version, info->libent_start, info->libent_end,
 				        info->libstub_start, info->libstub_end);
 				return info;
@@ -668,7 +691,7 @@ static int patch_imports(void)
 {
 	const proc_prx_info_t *info = find_prx_info();
 	if (info == NULL) {
-		rm_logf("prx info not found in executable");
+		plog("prx info not found in executable");
 		return 0;
 	}
 
@@ -676,25 +699,25 @@ static int patch_imports(void)
 	for (uint32_t p = info->libstub_start; p < info->libstub_end; ) {
 		const lib_stub_t *stub = (const lib_stub_t *)p;
 		if (stub->size == 0) {
-			rm_logf("  stub at 0x%08x has size 0, stopping", p);
+			plog("  stub at 0x%08x has size 0, stopping", p);
 			break;
 		}
 		const char *mod = (const char *)stub->module_name;
-		rm_logf("  stub 0x%08x size 0x%02x funcs %u vars %u module '%.40s'",
+		plog("  stub 0x%08x size 0x%02x funcs %u vars %u module '%.40s'",
 		        p, stub->size, stub->num_func, stub->num_var, mod ? mod : "(null)");
 		if (mod && mod[0] == 's' && mod[1] == 'y' && mod[2] == 's' && mod[3] == '_' &&
 		    mod[4] == 'i' && mod[5] == 'o' && mod[6] == '\0') {
 			const uint32_t *nids  = (const uint32_t *)stub->func_nid;
 			const uint32_t *slots = (const uint32_t *)stub->func_table;
 			for (uint16_t f = 0; f < stub->num_func; f++) {
-				rm_logf("    sys_io import %u: nid 0x%08x slot %p -> 0x%08x", f, nids[f], &slots[f], slots[f]);
+				plog("    sys_io import %u: nid 0x%08x slot %p -> 0x%08x", f, nids[f], &slots[f], slots[f]);
 				for (uint32_t h = 0; h < NUM_HOOKS; h++) {
 					if (nids[f] != g_hooks[h].nid || g_hooks[h].slot) continue;
 					g_hooks[h].slot     = (uint32_t)&slots[f];
 					g_hooks[h].original = slots[f];
 					if (g_hooks[h].hook == (void *)hook_GetInfo)
 						g_orig_get_info = slots[f];
-					rm_logf("    hooking nid 0x%08x: slot 0x%08x original OPD 0x%08x hook OPD %p",
+					plog("    hooking nid 0x%08x: slot 0x%08x original OPD 0x%08x hook OPD %p",
 					        g_hooks[h].nid, g_hooks[h].slot, g_hooks[h].original, g_hooks[h].hook);
 					write_u32(g_hooks[h].slot, (uint32_t)g_hooks[h].hook);
 					patched++;
@@ -705,7 +728,7 @@ static int patch_imports(void)
 	}
 	for (uint32_t h = 0; h < NUM_HOOKS; h++)
 		if (!g_hooks[h].slot)
-			rm_logf("  nid 0x%08x not imported by the game, not hooked", g_hooks[h].nid);
+			plog("  nid 0x%08x not imported by the game, not hooked", g_hooks[h].nid);
 	return patched;
 }
 
@@ -791,10 +814,12 @@ static void riff_thread(uint64_t arg)
 	rm_logf("selecting profile...");
 	select_profile();
 	report(RIFF_STEP_PROFILE, 0);
-	rm_logf("patching imports...");
-	int patched = patch_imports();
-	rm_logf("imports patched: %d of %d", patched, (int)NUM_HOOKS);
-	report(RIFF_STEP_IMPORTS, patched);
+	/* patch_imports ran silently in module_start; log what it did. */
+	for (uint32_t h = 0; h < NUM_HOOKS; h++)
+		rm_logf("import nid 0x%08x: %s, slot 0x%08x, original OPD 0x%08x", g_hooks[h].nid,
+		        g_hooks[h].slot ? "hooked" : "not imported by the game", g_hooks[h].slot, g_hooks[h].original);
+	rm_logf("imports patched: %d of %d", g_patched, (int)NUM_HOOKS);
+	report(RIFF_STEP_IMPORTS, g_patched);
 
 	rm_logf("cellSysmoduleLoadModule(USBD)...");
 	int32_t r = cellSysmoduleLoadModule(CELL_SYSMODULE_USBD);
@@ -829,6 +854,26 @@ static void riff_thread(uint64_t arg)
  * Copies the loader's riff_arg_t from addr if it is there. Reads through PS3MAPI
  * so a bad address returns an error instead of crashing module_start.
  */
+/* 0 = riff_thread not started, 1 = starting, 2 = started (or failed, see the mark). */
+static volatile uint32_t g_boot_state;
+
+/*
+ * Starts riff_thread. Called by every pad hook, so it first runs on one of the
+ * game's own threads, where liblv2 works; later calls return at once.
+ */
+static void bootstrap(void)
+{
+	if (g_boot_state != 0 || !__sync_bool_compare_and_swap(&g_boot_state, 0, 1))
+		return;
+	mark(__LINE__, 0);
+	g_log_ok = true;
+	g_running = true;
+	int r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
+	                              SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
+	mark(__LINE__, r);
+	g_boot_state = 2;
+}
+
 static bool take_loader_arg(uint32_t addr)
 {
 	riff_arg_t a;
@@ -843,12 +888,12 @@ static bool take_loader_arg(uint32_t addr)
 int riff_start(size_t args, void *argp)
 {
 	/*
-	 * Cobra runs module_start on a thread its kernel code creates, and liblv2
-	 * functions that use per-thread state don't work there: rm_logf stopped
-	 * inside sys_time_get_system_time / sys_ppu_thread_get_id on hardware. So
-	 * only make direct syscalls here (no logging), start riff_thread with
-	 * liblv2's sys_ppu_thread_create, and do everything else there. The
-	 * loader's module_start does the same.
+	 * Cobra runs module_start on a thread its kernel code creates, where calls
+	 * into liblv2 never return (seen on hardware: sys_ppu_thread_get_id inside
+	 * rm_logf, then sys_ppu_thread_create). So only make direct syscalls here:
+	 * take the loader's argument, report, and hook the game's cellPad imports.
+	 * The first hooked call comes from one of the game's own threads, and
+	 * bootstrap() starts riff_thread from there.
 	 *
 	 * Cobra passes the loader's argument as the first parameter (args); argp
 	 * held 0xc8 on hardware, and reading that crashed module_start. Check argp
@@ -861,11 +906,8 @@ int riff_start(size_t args, void *argp)
 	g_status.result = take_loader_arg((uint32_t)args) ? 0 : take_loader_arg((uint32_t)argp) ? 1 : 2;
 	push_status();
 
-	g_running = true;
-	mark(__LINE__, 0);
-	int r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
-	                              SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
-	mark(__LINE__, r);
+	g_patched = patch_imports();
+	mark(__LINE__, g_patched);
 	return SYS_PRX_RESIDENT;
 }
 
