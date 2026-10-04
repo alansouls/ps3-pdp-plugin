@@ -9,26 +9,14 @@
 #include <sys/syscall.h>
 
 #define SYSCALL8_OPCODE_PS3MAPI             0x7777
-#define PS3MAPI_OPCODE_GET_ALL_PROC_PID     0x0021
-#define PS3MAPI_OPCODE_GET_PROC_NAME_BY_PID 0x0022
 #define PS3MAPI_OPCODE_SET_PROC_MEM         0x0032
 #define PS3MAPI_OPCODE_LOAD_PROC_MODULE     0x0044
 
-#define PS3MAPI_MAX_PROCESS 16
-
-static inline int ps3mapi_get_all_pids(uint32_t *pids)
-{
-	system_call_3(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_ALL_PROC_PID,
-	              (uint64_t)(uint32_t)pids);
-	return_to_user_prog(int);
-}
-
-static inline int ps3mapi_get_proc_name(uint32_t pid, char *name)
-{
-	system_call_4(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_PROC_NAME_BY_PID,
-	              (uint64_t)pid, (uint64_t)(uint32_t)name);
-	return_to_user_prog(int);
-}
+/*
+ * Don't list processes through PS3MAPI (GET_ALL_PROC_PID / GET_PROC_NAME_BY_PID)
+ * to detect games: GET_ALL_PROC_PID hung the whole console when called while a
+ * game was starting. The loader asks VSH for the game's pid instead.
+ */
 
 static inline int ps3mapi_set_proc_mem(uint32_t pid, uint32_t addr, const void *buf, uint32_t size)
 {

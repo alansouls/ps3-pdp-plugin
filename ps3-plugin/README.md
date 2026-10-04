@@ -8,7 +8,7 @@ The guitar plugs into the PS3 directly over USB.
 
 | Piece | Runs in | Job |
 | --- | --- | --- |
-| `riffmaster_loader.sprx` | VSH (`boot_plugins.txt`) | Watches for a game (`EBOOT.BIN`) process and injects the game plugin through Cobra PS3MAPI after 8 s. |
+| `riffmaster_loader.sprx` | VSH (`boot_plugins.txt`) | Asks VSH for the running game's process ID (`GetGameProcessID`, as webMAN MOD does) and injects the game plugin through Cobra PS3MAPI after 8 s. |
 | `riffmaster_game.sprx` | Game process | Opens the Riffmaster through `cellUsbd`. Converts each report using `../riffmaster_report_map.md`. Feeds a virtual pad through `cellPadLdd`. Redirects the game's `cellPadGetInfo/GetInfo2/PeriphGetInfo/PeriphGetData` imports so that pad reports as a guitar. |
 
 ### XMB notifications
@@ -82,20 +82,20 @@ Both plugins write to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
 
 Two settings in `riffmaster.cfg` help when the console freezes and the log doesn't say why:
 
-- `debug_stage=0..3` turns the loader's work on one step at a time. `0` only logs. `1` adds notifications and
-  polling of the process list. `2` adds reading process names (game detection) without injecting. `3` is normal
-  operation. Reboot, launch the game, and the first stage that freezes is where the problem is.
-- `trace=1` logs before and after every PS3MAPI call the loader makes. If the last line in `riffmaster.old.log`
+- `debug_stage=0..2` turns the loader's work on one step at a time. `0` only logs. `1` adds notifications and
+  game detection without injecting. `2` is normal operation. Reboot, launch the game, and the first stage that
+  freezes is where the problem is.
+- `trace=1` logs before and after every call the loader's poll makes. If the last line in `riffmaster.old.log`
   is a `trace: ...` line without its matching `returned` line, that call hung.
 
-The loader reads each process's name once, only after the process has shown up in two polls in a row. That way
-it never asks PS3MAPI about a process that is still starting.
+The loader detects games through VSH's own `GetCooperationMode` and `GetGameProcessID` exports, not PS3MAPI.
+An earlier version listed processes with PS3MAPI `GET_ALL_PROC_PID` every 2 s, and that call hung the whole
+console when it ran while a game was starting.
 
 A healthy run looks roughly like this:
 
 ```
 === new boot, riffmaster_loader starting ... ===
-new process: pid 0x... / process pid 0x... is '...'  (each process, once)
 game process found: pid 0x..., waiting 8s before injecting
 calling ps3mapi_load_proc_module(pid 0x..., /dev_hdd0/plugins/riffmaster_game.sprx)...
 riff_start: module_start in pid 0x...
