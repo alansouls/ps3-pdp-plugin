@@ -740,6 +740,11 @@ static void riff_thread(uint64_t arg)
 	rm_logf("cellUsbdRegisterExtraLdd2(vid 0x%04x, pid 0x%04x-0x%04x)...", RM_VID, RM_PID_MIN, RM_PID_MAX);
 	r = cellUsbdRegisterExtraLdd2(&g_ldd_ops, RM_VID, RM_PID_MIN, RM_PID_MAX);
 	rm_logf("cellUsbdRegisterExtraLdd2 returned 0x%x", r);
+	const char *guitar = g_profile == &PROFILE_RB ? "Rock Band" : "Guitar Hero";
+	if (r == CELL_OK)
+		rm_notify_post("Riffmaster plugin loaded (%s guitar)", guitar);
+	else
+		rm_notify_post("Riffmaster plugin loaded, but USB setup failed (0x%x)", r);
 	rm_logf("setup done, heartbeat every 2s for 60s, then every 15s");
 
 	/* Heartbeat: shows how long the game process kept running. */

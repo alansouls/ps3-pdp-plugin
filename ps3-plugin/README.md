@@ -11,6 +11,21 @@ The guitar plugs into the PS3 directly over USB.
 | `riffmaster_loader.sprx` | VSH (`boot_plugins.txt`) | Watches for a game (`EBOOT.BIN`) process and injects the game plugin through Cobra PS3MAPI after 8 s. |
 | `riffmaster_game.sprx` | Game process | Opens the Riffmaster through `cellUsbd`. Converts each report using `../riffmaster_report_map.md`. Feeds a virtual pad through `cellPadLdd`. Redirects the game's `cellPadGetInfo/GetInfo2/PeriphGetInfo/PeriphGetData` imports so that pad reports as a guitar. |
 
+### XMB notifications
+
+| When | Message |
+| --- | --- |
+| Loader starts (after the XMB appears, or 30 s at most) | `Riffmaster loader loaded` |
+| A game process is detected | `Riffmaster: game found, loading guitar plugin in 8s` |
+| `ps3mapi_load_proc_module` fails | `Riffmaster: failed to load guitar plugin (0x...)` |
+| Game plugin finished setup | `Riffmaster plugin loaded (Guitar Hero guitar)` / `(Rock Band guitar)`, or `... but USB setup failed (0x...)` |
+
+Notifications can only be shown from VSH, which the loader runs in. It finds `vshtask_notify` in the VSH export
+table the same way webMAN MOD does. The game plugin can't call it from inside the game process. Instead it writes its
+message to `/dev_hdd0/tmp/riffmaster.notify`, and the loader shows that message and deletes the file on its next
+poll (1–2 s later). VSH plugins reload when you quit a game, so "loader loaded" also appears each time you return
+to the XMB.
+
 ### Button mapping
 
 | Riffmaster | PS3 guitar |
@@ -63,11 +78,24 @@ Both plugins write to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
 - Hot paths are rate-limited. The game hooks log their first 5 calls, then every 1000th. USB
   reports log the first 8 as hex dumps, then the first 300 button changes, then every 100th.
 
+### Finding what freezes the console
+
+Two settings in `riffmaster.cfg` help when the console freezes and the log doesn't say why:
+
+- `debug_stage=0..3` turns the loader's work on one step at a time. `0` only logs. `1` adds notifications and
+  polling of the process list. `2` adds reading process names (game detection) without injecting. `3` is normal
+  operation. Reboot, launch the game, and the first stage that freezes is where the problem is.
+- `trace=1` logs before and after every PS3MAPI call the loader makes. If the last line in `riffmaster.old.log`
+  is a `trace: ...` line without its matching `returned` line, that call hung.
+
+The loader reads each process's name once, only after the process has shown up in two polls in a row. That way
+it never asks PS3MAPI about a process that is still starting.
+
 A healthy run looks roughly like this:
 
 ```
 === new boot, riffmaster_loader starting ... ===
-process list changed: ...                      (each pid and name)
+new process: pid 0x... / process pid 0x... is '...'  (each process, once)
 game process found: pid 0x..., waiting 8s before injecting
 calling ps3mapi_load_proc_module(pid 0x..., /dev_hdd0/plugins/riffmaster_game.sprx)...
 riff_start: module_start in pid 0x...

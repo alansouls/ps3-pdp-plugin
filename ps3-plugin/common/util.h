@@ -147,6 +147,30 @@ static inline int rm_read_file(const char *path, void *buf, uint32_t size)
 	return (int)nread;
 }
 
+#define RIFF_CFG_PATH "/dev_hdd0/plugins/riffmaster.cfg"
+
+/*
+ * Returns the decimal value of the first "key=<number>" line in a cfg buffer,
+ * or def if the key is missing. Lines starting with '#' are comments.
+ */
+static inline int rm_cfg_int(const char *buf, int n, const char *key, int def)
+{
+	size_t klen = rm_strlen(key);
+	for (int i = 0; i < n; ) {
+		int end = i;
+		while (end < n && buf[end] != '\n') end++;
+		if (buf[i] != '#' && (size_t)(end - i) > klen && buf[i + klen] == '=' &&
+		    rm_memifind(buf + i, klen, key)) {
+			int j = i + (int)klen + 1, v = 0;
+			if (j >= end || buf[j] < '0' || buf[j] > '9') return def;
+			while (j < end && buf[j] >= '0' && buf[j] <= '9') v = v * 10 + (buf[j++] - '0');
+			return v;
+		}
+		i = end + 1;
+	}
+	return def;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Formatting                                                               */
 /* ------------------------------------------------------------------------ */
@@ -321,6 +345,44 @@ static inline void rm_log_rotate(void)
 {
 	rm_fs_unlink(RIFF_LOG_OLD_PATH);
 	rm_fs_rename(RIFF_LOG_PATH, RIFF_LOG_OLD_PATH);
+}
+
+/* ------------------------------------------------------------------------ */
+/* XMB notification relay                                                   */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * XMB notifications can only be shown from the VSH process. The game plugin
+ * posts its message to this file, and the loader (in VSH) polls it, shows the
+ * message and deletes the file.
+ */
+#define RIFF_NOTIFY_PATH     "/dev_hdd0/tmp/riffmaster.notify"
+#define RIFF_NOTIFY_TMP_PATH "/dev_hdd0/tmp/riffmaster.notify.tmp"
+#define RIFF_NOTIFY_MAX      160
+
+/* Writes to a temp file and renames it, so the loader never reads half a message. */
+static inline void rm_notify_post(const char *fmt, ...)
+{
+	char msg[RIFF_NOTIFY_MAX];
+	rm_buf_t b = { msg, 0, sizeof(msg) - 1 };
+	va_list ap;
+	va_start(ap, fmt);
+	rm_vformat(&b, fmt, ap);
+	va_end(ap);
+	msg[b.n] = '\0';
+
+	int fd;
+	uint64_t written = 0;
+	int r = rm_fs_open(RIFF_NOTIFY_TMP_PATH, CELL_FS_O_WRONLY | CELL_FS_O_CREAT | CELL_FS_O_TRUNC, &fd);
+	if (r != 0) {
+		rm_logf("notify: open %s failed 0x%x", RIFF_NOTIFY_TMP_PATH, r);
+		return;
+	}
+	rm_fs_write(fd, msg, b.n, &written);
+	rm_fs_close(fd);
+	rm_fs_unlink(RIFF_NOTIFY_PATH);
+	r = rm_fs_rename(RIFF_NOTIFY_TMP_PATH, RIFF_NOTIFY_PATH);
+	rm_logf("notify: posted '%s' for the loader, rename 0x%x", msg, r);
 }
 
 #endif
