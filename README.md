@@ -167,3 +167,14 @@ Both plugins log to `/dev_hdd0/tmp/riffmaster.log`. With webMAN you can open it 
 | `tools/remote-build/` | The remote build server and client |
 | `riffmaster_report_map.md` | The Riffmaster's USB input report, byte by byte |
 | `hid_inspect.py`, `dump.txt` | The tool used to capture the report on a PC (`pip install hidapi`), and a capture |
+
+## License
+
+The source code in this repository is released under the [MIT License](LICENSE).
+
+The license covers this project's own code only. The PS3 SDK is not part of this repository and is not covered by
+it. The committed `.sprx` files are built with the SDK and contain small parts generated from it, such as the
+import stubs for the system libraries.
+
+"PlayStation", "PS3" and "Guitar Hero", "Rock Band" and "PDP Riffmaster" are trademarks of their respective
+owners. This project is not affiliated with or endorsed by any of them.
