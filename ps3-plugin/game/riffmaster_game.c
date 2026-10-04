@@ -790,22 +790,34 @@ static void riff_thread(uint64_t arg)
 	sys_ppu_thread_exit(0);
 }
 
+/*
+ * Copies the loader's riff_arg_t from addr if it is there. Reads through PS3MAPI
+ * so a bad address returns an error instead of crashing module_start.
+ */
+static bool take_loader_arg(uint32_t addr)
+{
+	riff_arg_t a;
+	if (addr < 0x10000 || (addr & 3) != 0)
+		return false;
+	if (ps3mapi_get_proc_mem(sys_process_getpid(), addr, &a, sizeof(a)) != 0 || a.magic != RIFF_ARG_MAGIC)
+		return false;
+	rm_memcpy(&g_arg, &a, sizeof(g_arg));
+	return true;
+}
+
 int riff_start(size_t args, void *argp)
 {
 	/*
 	 * Report to the loader before anything else, so it learns that module_start
 	 * ran even if logging to a file fails or hangs. The loader's argument is
-	 * freed when module_start returns, so keep a copy. It should arrive in argp,
-	 * but accept it in args too in case Cobra passes it as the first parameter.
+	 * freed when module_start returns, so keep a copy. Cobra passes it as the
+	 * first parameter (args); argp held 0xc8 on hardware, and reading that
+	 * crashed module_start. Check argp too, but only through take_loader_arg.
 	 */
 	g_status.start_args = (uint32_t)args;
 	g_status.start_argp = (uint32_t)argp;
-	const riff_arg_t *a = (const riff_arg_t *)argp;
-	if (a == NULL && args >= 0x10000 && (args & 3) == 0)
-		a = (const riff_arg_t *)args;
-	if (a != NULL && a->magic == RIFF_ARG_MAGIC)
-		rm_memcpy(&g_arg, a, sizeof(g_arg));
-	report(RIFF_STEP_MODULE_START, a == (const riff_arg_t *)argp ? 0 : 1);
+	int where = take_loader_arg((uint32_t)args) ? 0 : take_loader_arg((uint32_t)argp) ? 1 : 2;
+	report(RIFF_STEP_MODULE_START, where);
 
 	rm_logf("riff_start: module_start in pid 0x%x, args 0x%x argp %p", sys_process_getpid(), (unsigned)args, argp);
 	rm_logf("riff_start: loader arg %s, loader pid 0x%x, status at 0x%08x",
