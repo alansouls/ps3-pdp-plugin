@@ -25,10 +25,11 @@ static inline int ps3mapi_set_proc_mem(uint32_t pid, uint32_t addr, const void *
 	return_to_user_prog(int);
 }
 
-static inline int ps3mapi_load_proc_module(uint32_t pid, const char *path)
+/* Cobra copies arg (up to 64 KB) into the process and passes it to module_start as argp. */
+static inline int ps3mapi_load_proc_module(uint32_t pid, const char *path, const void *arg, uint32_t arg_size)
 {
 	system_call_6(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_LOAD_PROC_MODULE,
-	              (uint64_t)pid, (uint64_t)(uint32_t)path, 0, 0);
+	              (uint64_t)pid, (uint64_t)(uint32_t)path, (uint64_t)(uint32_t)arg, (uint64_t)arg_size);
 	return_to_user_prog(int);
 }
 

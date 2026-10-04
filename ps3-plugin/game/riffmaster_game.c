@@ -30,6 +30,7 @@
 #define USB_CLASS_HID 0x03
 #endif
 #include "../common/ps3mapi.h"
+#include "../common/status.h"
 
 SYS_MODULE_INFO(riffmaster_game, 0, 1, 0);
 SYS_MODULE_START(riff_start);
@@ -123,6 +124,27 @@ static int32_t ldd_port(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* Progress reports to the loader (see common/status.h)                      */
+/* ------------------------------------------------------------------------ */
+
+static riff_arg_t    g_arg;     /* from the loader, magic 0 if none was passed */
+static riff_status_t g_status;
+
+static void report(uint32_t step, int32_t result)
+{
+	g_status.seq++;
+	g_status.step    = step;
+	g_status.result  = result;
+	g_status.log_err = rm_log_err;
+	g_status.profile = g_profile == &PROFILE_RB ? 'r' : 'g';
+	if (g_arg.magic != RIFF_ARG_MAGIC)
+		return;
+	int r = ps3mapi_set_proc_mem(g_arg.vsh_pid, g_arg.status_addr, &g_status, sizeof(g_status));
+	rm_logf("report step %u result 0x%x to loader pid 0x%x at 0x%08x: 0x%x",
+	        step, result, g_arg.vsh_pid, g_arg.status_addr, r);
+}
+
+/* ------------------------------------------------------------------------ */
 /* Mapping                                                                   */
 /* ------------------------------------------------------------------------ */
 
@@ -195,6 +217,8 @@ static void handle_report(const uint8_t *r, int32_t len)
 		return;
 	}
 	if (rm_log_every(&g_n_reports, 8, 0)) {
+		if (g_n_reports == 1)
+			report(RIFF_STEP_FIRST_REPORT, len);
 		rm_logf("report #%u, len %d", g_n_reports, len);
 		rm_log_hex("  report", r, (size_t)len);
 	}
@@ -366,6 +390,7 @@ static int rm_attach(int32_t dev_id)
 	rm_logf("  SET_CONFIGURATION %d...", cfg->bConfigurationValue);
 	int32_t r = cellUsbdSetConfiguration(g_ctrl_pipe, cfg->bConfigurationValue, set_config_done, NULL);
 	rm_logf("  cellUsbdSetConfiguration returned 0x%x", r);
+	report(RIFF_STEP_ATTACHED, r);
 	return r == CELL_OK ? CELL_USBD_ATTACH_SUCCEEDED : CELL_USBD_ATTACH_FAILED;
 }
 
@@ -724,27 +749,29 @@ static void riff_thread(uint64_t arg)
 {
 	(void)arg;
 	rm_logf("riffmaster_game thread started");
+	report(RIFF_STEP_THREAD, 0);
 
 	rm_logf("selecting profile...");
 	select_profile();
+	report(RIFF_STEP_PROFILE, 0);
 	rm_logf("patching imports...");
-	rm_logf("imports patched: %d of %d", patch_imports(), (int)NUM_HOOKS);
+	int patched = patch_imports();
+	rm_logf("imports patched: %d of %d", patched, (int)NUM_HOOKS);
+	report(RIFF_STEP_IMPORTS, patched);
 
 	rm_logf("cellSysmoduleLoadModule(USBD)...");
 	int32_t r = cellSysmoduleLoadModule(CELL_SYSMODULE_USBD);
 	rm_logf("cellSysmoduleLoadModule(USBD) returned 0x%x", r);
+	report(RIFF_STEP_USBD_MODULE, r);
 	rm_logf("cellUsbdInit()...");
 	r = cellUsbdInit();
 	rm_logf("cellUsbdInit returned 0x%x%s", r,
 	        r == (int32_t)CELL_USBD_ERROR_ALREADY_INITIALIZED ? " (already initialized)" : "");
+	report(RIFF_STEP_USBD_INIT, r);
 	rm_logf("cellUsbdRegisterExtraLdd2(vid 0x%04x, pid 0x%04x-0x%04x)...", RM_VID, RM_PID_MIN, RM_PID_MAX);
 	r = cellUsbdRegisterExtraLdd2(&g_ldd_ops, RM_VID, RM_PID_MIN, RM_PID_MAX);
 	rm_logf("cellUsbdRegisterExtraLdd2 returned 0x%x", r);
-	const char *guitar = g_profile == &PROFILE_RB ? "Rock Band" : "Guitar Hero";
-	if (r == CELL_OK)
-		rm_notify_post("Riffmaster plugin loaded (%s guitar)", guitar);
-	else
-		rm_notify_post("Riffmaster plugin loaded, but USB setup failed (0x%x)", r);
+	report(RIFF_STEP_READY, r);
 	rm_logf("setup done, heartbeat every 2s for 60s, then every 15s");
 
 	/* Heartbeat: shows how long the game process kept running. */
@@ -764,6 +791,12 @@ static void riff_thread(uint64_t arg)
 int riff_start(size_t args, void *argp)
 {
 	rm_logf("riff_start: module_start in pid 0x%x, args %u argp %p", sys_process_getpid(), (unsigned)args, argp);
+	/* argp is freed when module_start returns, so keep a copy. */
+	if (argp != NULL && ((const riff_arg_t *)argp)->magic == RIFF_ARG_MAGIC)
+		rm_memcpy(&g_arg, argp, sizeof(g_arg));
+	rm_logf("riff_start: loader arg %s, loader pid 0x%x, status at 0x%08x",
+	        g_arg.magic == RIFF_ARG_MAGIC ? "ok" : "missing", g_arg.vsh_pid, g_arg.status_addr);
+	report(RIFF_STEP_MODULE_START, 0);
 	sys_lwmutex_attribute_t attr;
 	sys_lwmutex_attribute_initialize(attr);
 	int r = sys_lwmutex_create(&g_lock, &attr);

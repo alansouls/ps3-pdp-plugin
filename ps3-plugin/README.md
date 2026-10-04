@@ -19,12 +19,21 @@ The guitar plugs into the PS3 directly over USB.
 | A game process is detected | `Riffmaster: game found, loading guitar plugin in 8s` |
 | `ps3mapi_load_proc_module` fails | `Riffmaster: failed to load guitar plugin (0x...)` |
 | Game plugin finished setup | `Riffmaster plugin loaded (Guitar Hero guitar)` / `(Rock Band guitar)`, or `... but USB setup failed (0x...)` |
+| Game plugin attached the guitar | `Riffmaster guitar connected` / `Riffmaster guitar attach failed (0x...)` |
+| Setup not finished 20 s after injection | `Riffmaster: guitar plugin didn't report back`, or `Riffmaster: plugin stopped after '<step>' (0x...)` |
 
 Notifications can only be shown from VSH, which the loader runs in. It finds `vshtask_notify` in the VSH export
-table the same way webMAN MOD does. The game plugin can't call it from inside the game process. Instead it writes its
-message to `/dev_hdd0/tmp/riffmaster.notify`, and the loader shows that message and deletes the file on its next
-poll (1–2 s later). VSH plugins reload when you quit a game, so "loader loaded" also appears each time you return
-to the XMB.
+table the same way webMAN MOD does. The game plugin can't call it from inside the game process, so it reports to the
+loader instead (see `common/status.h`):
+
+1. When injecting, the loader passes its process ID and the address of a status struct as `module_start`'s argument.
+2. After each setup step, the game plugin writes that struct into the loader's memory with PS3MAPI `SET_PROC_MEM`.
+3. The loader logs every step as `game plugin: step N (...)` and shows the notifications above.
+
+This doesn't touch the filesystem, so it works even if the game process can't write the log. The status also
+carries the error code from the game plugin's last attempt to open the log file (`game log open error`).
+
+VSH plugins reload when you quit a game, so "loader loaded" also appears each time you return to the XMB.
 
 ### Button mapping
 

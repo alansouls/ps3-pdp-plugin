@@ -11,10 +11,12 @@
 #include <sys/prx.h>
 #include <sys/ppu_thread.h>
 #include <sys/timer.h>
+#include <sys/process.h>
 
 #define RIFF_LOG_TAG "loader"
 #include "../common/util.h"
 #include "../common/ps3mapi.h"
+#include "../common/status.h"
 
 SYS_MODULE_INFO(riffmaster_loader, 0, 1, 0);
 SYS_MODULE_START(loader_start);
@@ -63,6 +65,7 @@ static void begin_log(void)
 
 /* Wait up to this long for the XMB to appear before showing the "loaded" notification anyway. */
 #define XMB_WAIT_SEC      30
+#define NOTIFY_MAX        160
 
 #define NID_VSHTASK_NOTIFY      0xA02D46E7  /* vshtask: (int, const char *msg) */
 #define NID_PAF_VIEW_FIND       0xF21655F3  /* paf View_Find: (const char *plugin) -> view or 0 */
@@ -124,7 +127,7 @@ static bool xmb_ready(void)
 /* Shows an XMB notification and logs it. */
 static void notify(const char *fmt, ...)
 {
-	char msg[RIFF_NOTIFY_MAX];
+	char msg[NOTIFY_MAX];
 	rm_buf_t b = { msg, 0, sizeof(msg) - 1 };
 	va_list ap;
 	va_start(ap, fmt);
@@ -137,15 +140,65 @@ static void notify(const char *fmt, ...)
 		g_vshtask_notify(0, msg);
 }
 
-/* Shows a message the game plugin posted with rm_notify_post(), if there is one. */
-static void relay_game_notification(void)
+/* ------------------------------------------------------------------------ */
+/* Game plugin progress (see common/status.h)                                */
+/* ------------------------------------------------------------------------ */
+
+/* If the game plugin hasn't finished setup this long after injection, say where it stopped. */
+#define REPORT_TIMEOUT_SEC 20
+
+/* Written by the game plugin through PS3MAPI SET_PROC_MEM. */
+static volatile riff_status_t g_game_status;
+static uint32_t g_seen_seq;
+static uint64_t g_report_deadline;  /* 0 once setup finished or the timeout was reported */
+
+static const char *const STEP_NAMES[RIFF_STEP_COUNT] = {
+	"none", "module_start", "thread started", "profile selected", "imports hooked",
+	"USBD module loaded", "cellUsbdInit", "setup done", "guitar attached", "first input report",
+};
+
+static const char *step_name(uint32_t step)
 {
-	char msg[RIFF_NOTIFY_MAX + 1];
-	int n = rm_read_file(RIFF_NOTIFY_PATH, msg, RIFF_NOTIFY_MAX);
-	if (n < 0) return;
-	rm_fs_unlink(RIFF_NOTIFY_PATH);
-	msg[n] = '\0';
-	if (n > 0) notify("%s", msg);
+	return step < RIFF_STEP_COUNT ? STEP_NAMES[step] : "?";
+}
+
+static void reset_game_status(void)
+{
+	rm_memset((void *)&g_game_status, 0, sizeof(g_game_status));
+	g_seen_seq = 0;
+	g_report_deadline = 0;
+}
+
+/* Logs new progress from the game plugin and shows the notifications that matter. */
+static void check_game_status(void)
+{
+	riff_status_t s;
+	rm_memcpy(&s, (const void *)&g_game_status, sizeof(s));
+	if (s.seq != g_seen_seq) {
+		g_seen_seq = s.seq;
+		rm_logf("game plugin: step %u (%s), result 0x%x, profile %c, game log open error 0x%x",
+		        s.step, step_name(s.step), s.result, s.profile ? s.profile : '-', s.log_err);
+		if (s.step == RIFF_STEP_READY) {
+			g_report_deadline = 0;
+			const char *guitar = s.profile == 'r' ? "Rock Band" : "Guitar Hero";
+			if (s.result == 0)
+				notify("Riffmaster plugin loaded (%s guitar)", guitar);
+			else
+				notify("Riffmaster plugin loaded, but USB setup failed (0x%x)", s.result);
+		} else if (s.step == RIFF_STEP_ATTACHED) {
+			notify(s.result == 0 ? "Riffmaster guitar connected" : "Riffmaster guitar attach failed (0x%x)", s.result);
+		}
+	}
+	if (g_report_deadline && uptime_sec() >= g_report_deadline) {
+		g_report_deadline = 0;
+		if (s.seq == 0) {
+			rm_logf("game plugin sent no progress report within %ds of injection", REPORT_TIMEOUT_SEC);
+			notify("Riffmaster: guitar plugin didn't report back");
+		} else {
+			rm_logf("game plugin stopped at step %u (%s), result 0x%x", s.step, step_name(s.step), s.result);
+			notify("Riffmaster: plugin stopped after '%s' (0x%x)", step_name(s.step), s.result);
+		}
+	}
 }
 
 /* ------------------------------------------------------------------------ */
@@ -216,11 +269,17 @@ static void log_game_plugin_file(void)
 static void inject(uint32_t pid)
 {
 	log_game_plugin_file();
-	rm_logf("calling ps3mapi_load_proc_module(pid 0x%08x, %s)...", pid, GAME_PLUGIN_PATH);
-	int r = ps3mapi_load_proc_module(pid, GAME_PLUGIN_PATH);
+	reset_game_status();
+	riff_arg_t arg = { RIFF_ARG_MAGIC, (uint32_t)sys_process_getpid(), (uint32_t)&g_game_status };
+	rm_logf("calling ps3mapi_load_proc_module(pid 0x%08x, %s), arg: loader pid 0x%x, status at 0x%08x...",
+	        pid, GAME_PLUGIN_PATH, arg.vsh_pid, arg.status_addr);
+	int r = ps3mapi_load_proc_module(pid, GAME_PLUGIN_PATH, &arg, sizeof(arg));
 	rm_logf("ps3mapi_load_proc_module returned %d (0x%x)%s", r, r, r == 0 ? "" : "  <- FAILED");
 	if (r != 0)
 		notify("Riffmaster: failed to load guitar plugin (0x%x)", r);
+	else
+		g_report_deadline = uptime_sec() + REPORT_TIMEOUT_SEC;
+	check_game_status();
 }
 
 static void loader_thread(uint64_t arg)
@@ -242,8 +301,6 @@ static void loader_thread(uint64_t arg)
 		if (g_running_mode == NULL || g_game_pid == NULL)
 			rm_logf("game detection exports not found, the loader can't detect games");
 	}
-	/* A message left over from an earlier game would be shown as if it were new. */
-	rm_fs_unlink(RIFF_NOTIFY_PATH);
 	announce_deadline = uptime_sec() + XMB_WAIT_SEC;
 
 	while (g_running) {
@@ -259,7 +316,7 @@ static void loader_thread(uint64_t arg)
 					notify("Riffmaster loader loaded (debug stage %d)", g_stage);
 				announce_pending = false;
 			}
-			relay_game_notification();
+			check_game_status();
 
 			if (g_trace) rm_logf("trace: poll #%u", polls);
 			pid = game_pid();
