@@ -58,8 +58,9 @@ read when the loader starts at boot, so reboot after changing them. Lines starti
 | `debug_stage` | `0`–`2`: for tracking down a console freeze, see [`ps3-plugin/README.md`](ps3-plugin/README.md#finding-what-freezes-the-console). | `2` (normal) |
 | `trace` | `1`: log every call the loader makes while polling, for the same purpose. | `0` |
 
-The sample `ps3-plugin/riffmaster.cfg` sets `profile=gh`. Change it to `auto` (or remove the line) before playing
-Rock Band.
+Only `profile=gh` has been tested: the three tested games ran with it. `auto` (the default, also in the sample
+`ps3-plugin/riffmaster.cfg`) and `rb` haven't been tested yet. With `auto`, Guitar Hero games should still get the
+Guitar Hero ID, but if one doesn't react to the guitar, set `profile=gh`.
 
 ### Button mapping
 
