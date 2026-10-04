@@ -27,11 +27,16 @@
 #endif
 
 /*
- * Called at each step inside rm_logf with a number (1 = entered ... 9 = file
- * closed). The game plugin defines it to report how far a log write got.
+ * The game plugin can't write files (opening the log fails with EACCES in the
+ * game process), so it overrides these: RIFF_LOG_ENABLED() is false until
+ * logging is safe on the calling thread, and RIFF_LOG_SINK(line, len) puts the
+ * line in a memory buffer the loader copies into the log file.
  */
-#ifndef RIFF_LOG_PROBE
-#define RIFF_LOG_PROBE(n) ((void)0)
+#ifndef RIFF_LOG_ENABLED
+#define RIFF_LOG_ENABLED() 1
+#endif
+#ifndef RIFF_LOG_SINK
+#define RIFF_LOG_SINK(line, len) rm_log_write(line, len)
 #endif
 
 static inline void rm_memset(void *dst, int v, size_t n)
@@ -285,17 +290,11 @@ static inline void rm_format(rm_buf_t *b, const char *fmt, ...)
  * powered off right after. That makes logging slow (milliseconds per line),
  * so per-frame and per-report paths must rate-limit with rm_log_every().
  */
-/* Last error from opening the log file, 0 once it opens. Reported to the loader by the game plugin. */
-static int rm_log_err;
-
 static inline void rm_log_write(const char *line, size_t len)
 {
 	int fd;
 	uint64_t written;
-	RIFF_LOG_PROBE(4);
-	rm_log_err = rm_fs_open(RIFF_LOG_PATH, CELL_FS_O_WRONLY | CELL_FS_O_CREAT | CELL_FS_O_APPEND, &fd);
-	RIFF_LOG_PROBE(5);
-	if (rm_log_err != 0)
+	if (rm_fs_open(RIFF_LOG_PATH, CELL_FS_O_WRONLY | CELL_FS_O_CREAT | CELL_FS_O_APPEND, &fd) != 0)
 		return;
 	CellFsStat st;
 	if (rm_fs_fstat(fd, &st) == 0 && st.st_size + len > RIFF_LOG_MAX_BYTES) {
@@ -303,13 +302,9 @@ static inline void rm_log_write(const char *line, size_t len)
 		rm_fs_ftruncate(fd, 0);
 		rm_fs_write(fd, wrap, sizeof(wrap) - 1, &written);
 	}
-	RIFF_LOG_PROBE(6);
 	rm_fs_write(fd, line, len, &written);
-	RIFF_LOG_PROBE(7);
 	rm_fs_fsync(fd);
-	RIFF_LOG_PROBE(8);
 	rm_fs_close(fd);
-	RIFF_LOG_PROBE(9);
 }
 
 /* Appends "[uptime] tag tid: <formatted msg>\n". */
@@ -318,11 +313,11 @@ static inline void rm_logf(const char *fmt, ...)
 	char line[256];
 	rm_buf_t b = { line, 0, sizeof(line) - 1 };
 
-	RIFF_LOG_PROBE(1);
+	if (!RIFF_LOG_ENABLED())
+		return;
 	uint64_t us = sys_time_get_system_time();
 	sys_ppu_thread_t tid = 0;
 	sys_ppu_thread_get_id(&tid);
-	RIFF_LOG_PROBE(2);
 	rm_format(&b, "[%5llu.%06llu] %-6s t%llx: ", us / 1000000, us % 1000000,
 	          RIFF_LOG_TAG, (unsigned long long)tid);
 
@@ -332,8 +327,7 @@ static inline void rm_logf(const char *fmt, ...)
 	va_end(ap);
 
 	line[b.n++] = '\n';
-	RIFF_LOG_PROBE(3);
-	rm_log_write(line, b.n);
+	RIFF_LOG_SINK(line, b.n);
 }
 
 /* Logs n bytes as hex, 16 per line. */

@@ -24,9 +24,17 @@
 #include <cell/cell_fs.h>
 
 #define RIFF_LOG_TAG "game"
-/* Report how far the first log writes get (see riff_log_probe). */
-static void riff_log_probe(unsigned point);
-#define RIFF_LOG_PROBE(n) riff_log_probe(n)
+/*
+ * module_start runs on a thread created by Cobra's kernel code, where calls into
+ * liblv2 never return (seen on hardware: sys_ppu_thread_get_id inside rm_logf,
+ * then sys_ppu_thread_create), so logging stays off until bootstrap() runs on a
+ * game thread. The game process can't write files (EACCES), so log lines go to
+ * a memory buffer the loader copies into the log file (log_sink).
+ */
+static volatile bool g_log_ok;
+static void log_sink(const char *line, size_t len);
+#define RIFF_LOG_ENABLED()       (g_log_ok)
+#define RIFF_LOG_SINK(line, len) log_sink(line, len)
 #include "../common/util.h"
 
 #ifndef USB_CLASS_HID
@@ -119,7 +127,7 @@ static sys_ppu_thread_t g_thread;
 /* Counters for the heartbeat and for rate-limiting logs on hot paths. */
 static uint32_t g_n_read_done, g_n_read_err, g_n_submit_err, g_n_bad_report;
 static uint32_t g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err;
-static uint32_t g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data;
+static uint32_t g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data, g_n_get_data;
 
 static int32_t ldd_port(void)
 {
@@ -139,7 +147,6 @@ static int g_patched;  /* imports hooked by module_start */
 static void push_status(void)
 {
 	g_status.seq++;
-	g_status.log_err = rm_log_err;
 	g_status.profile = g_profile == &PROFILE_RB ? 'r' : 'g';
 	if (g_arg.magic == RIFF_ARG_MAGIC)
 		g_status.report_err = ps3mapi_set_proc_mem(g_arg.vsh_pid, g_arg.status_addr, &g_status, sizeof(g_status));
@@ -162,26 +169,23 @@ static void mark(uint32_t line, int32_t result)
 	push_status();
 }
 
-/* Only the first few log lines are probed; each probe costs a PS3MAPI call. */
-#define LOG_PROBE_LINES 3
-static uint32_t g_probed_lines;
+/* ------------------------------------------------------------------------ */
+/* Log buffer (see riff_logbuf_t in common/status.h)                         */
+/* ------------------------------------------------------------------------ */
 
-/*
- * module_start runs on a thread created by Cobra's kernel code, where calls into
- * liblv2 never return (seen on hardware: sys_ppu_thread_get_id inside rm_logf,
- * then sys_ppu_thread_create). The import patching it does logs through plog,
- * which stays silent until a real thread exists (see bootstrap()).
- */
-static volatile bool g_log_ok;
-#define plog(...) do { if (g_log_ok) rm_logf(__VA_ARGS__); } while (0)
+static riff_logbuf_t g_logbuf;
+static sys_lwmutex_t g_log_lock;  /* created by bootstrap() before g_log_ok is set */
 
-static void riff_log_probe(unsigned point)
+static void log_sink(const char *line, size_t len)
 {
-	if (g_probed_lines >= LOG_PROBE_LINES) return;
-	g_status.log_probe = point;
-	push_status();
-	if (point == 9 || (point == 5 && rm_log_err != 0))
-		g_probed_lines++;
+	sys_lwmutex_lock(&g_log_lock, 0);
+	uint32_t pos = g_logbuf.write_pos;
+	for (size_t i = 0; i < len; i++)
+		g_logbuf.data[(pos + i) % RIFF_LOGBUF_SIZE] = line[i];
+	/* The loader may read write_pos at any time: publish it only after the bytes. */
+	__sync_synchronize();
+	g_logbuf.write_pos = pos + (uint32_t)len;
+	sys_lwmutex_unlock(&g_log_lock);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -491,7 +495,13 @@ static void bootstrap(void);
 static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 {
 	bootstrap();
-	return cellPadGetData(port_no, data);
+	int32_t r = cellPadGetData(port_no, data);
+	if (rm_log_every(&g_n_get_data, HOOK_LOG_FIRST, HOOK_LOG_EVERY))
+		rm_logf("hook_GetData #%u: port %u, ldd port %d, r 0x%x, len %d, digital 0x%04x 0x%04x",
+		        g_n_get_data, port_no, ldd_port(), r, r == CELL_OK ? data->len : -1,
+		        r == CELL_OK ? data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] : 0,
+		        r == CELL_OK ? data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] : 0);
+	return r;
 }
 
 static int32_t hook_GetInfo(CellPadInfo *info)
@@ -636,48 +646,80 @@ static import_hook_t g_hooks[] = {
 };
 #define NUM_HOOKS (sizeof(g_hooks) / sizeof(g_hooks[0]))
 
+/* The game's sys_io imports, recorded by patch_imports (which can't log) for riff_thread to log. */
+#define MAX_GAME_IO 64
+static uint32_t g_game_io[MAX_GAME_IO];
+static uint32_t g_n_game_io;
+
+/* Names of sys_io functions by NID, for the log. NID = first 4 bytes (LE) of SHA-1(name + PS3 suffix). */
+static const struct { uint32_t nid; const char *name; } IO_NAMES[] = {
+	{ 0x1CF98800, "cellPadInit" },          { 0x4D9B75D5, "cellPadEnd" },
+	{ 0x0D5F2C14, "cellPadClearBuf" },      { 0x8B72CDA1, "cellPadGetData" },
+	{ 0x6BC09C61, "cellPadGetDataExtra" },  { 0x3F797DFF, "cellPadGetRawData" },
+	{ 0xF65544EE, "cellPadSetActDirect" },  { 0x3AAAD464, "cellPadGetInfo" },
+	{ 0xA703A51D, "cellPadGetInfo2" },      { 0x578E3C98, "cellPadSetPortSetting" },
+	{ 0xF83F8182, "cellPadSetPressMode" },  { 0xBE5BE3BA, "cellPadSetSensorMode" },
+	{ 0x0E2DFAAD, "cellPadInfoPressMode" }, { 0x78200559, "cellPadInfoSensorMode" },
+	{ 0xDBF4C59C, "cellPadGetCapabilityInfo" }, { 0x4CC9B68D, "cellPadPeriphGetInfo" },
+	{ 0x8A00F264, "cellPadPeriphGetData" }, { 0x7066E242, "cellPadSetPortSettingExtra" },
+	{ 0xCD8B4E80, "cellPadSetLedConfig" },  { 0x20A97BA2, "cellPadLddRegisterController" },
+	{ 0xE442FAA8, "cellPadLddUnregisterController" }, { 0xBAFD6409, "cellPadLddDataInsert" },
+	{ 0x8B8231E5, "cellPadLddGetPortNo" },  { 0x433F6EC0, "cellKbInit" },
+	{ 0xBFCE3285, "cellKbEnd" },            { 0x2F1774D5, "cellKbGetInfo" },
+	{ 0xFF0A21B7, "cellKbRead" },           { 0xC9030138, "cellMouseInit" },
+	{ 0xE10183CE, "cellMouseEnd" },         { 0x5BAF30FB, "cellMouseGetInfo" },
+	{ 0x3138E632, "cellMouseGetData" },
+};
+
+static const char *io_name(uint32_t nid)
+{
+	for (uint32_t i = 0; i < sizeof(IO_NAMES) / sizeof(IO_NAMES[0]); i++)
+		if (IO_NAMES[i].nid == nid) return IO_NAMES[i].name;
+	return "?";
+}
+
 static void write_u32(uint32_t addr, uint32_t value)
 {
 	uint32_t pid = sys_process_getpid();
-	plog("  write_u32 0x%08x <- 0x%08x (was 0x%08x), ps3mapi_set_proc_mem pid 0x%x...",
+	rm_logf("  write_u32 0x%08x <- 0x%08x (was 0x%08x), ps3mapi_set_proc_mem pid 0x%x...",
 	        addr, value, *(volatile uint32_t *)addr, pid);
 	int r = ps3mapi_set_proc_mem(pid, addr, &value, sizeof(value));
-	plog("  ps3mapi_set_proc_mem returned %d (0x%x)", r, r);
+	rm_logf("  ps3mapi_set_proc_mem returned %d (0x%x)", r, r);
 	if (r != 0) {
-		plog("  falling back to a direct store (faults if the page is read-only)...");
+		rm_logf("  falling back to a direct store (faults if the page is read-only)...");
 		*(volatile uint32_t *)addr = value;
 	}
-	plog("  readback 0x%08x%s", *(volatile uint32_t *)addr,
+	rm_logf("  readback 0x%08x%s", *(volatile uint32_t *)addr,
 	        *(volatile uint32_t *)addr == value ? "" : "  <- MISMATCH");
 }
 
 static const proc_prx_info_t *find_prx_info(void)
 {
 	const uint8_t *elf = (const uint8_t *)EXEC_BASE;
-	plog("reading ELF header at 0x%08x...", EXEC_BASE);
-	if (g_log_ok) rm_log_hex("  elf header", elf, 0x40);
+	rm_logf("reading ELF header at 0x%08x...", EXEC_BASE);
+	rm_log_hex("  elf header", elf, 0x40);
 	if (elf[0] != 0x7F || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') {
-		plog("no ELF magic at 0x%08x", EXEC_BASE);
+		rm_logf("no ELF magic at 0x%08x", EXEC_BASE);
 		return NULL;
 	}
 
 	uint64_t phoff     = *(const uint64_t *)(elf + 0x20);
 	uint16_t phentsize = *(const uint16_t *)(elf + 0x36);
 	uint16_t phnum     = *(const uint16_t *)(elf + 0x38);
-	plog("phoff 0x%llx phentsize %u phnum %u", (unsigned long long)phoff, phentsize, phnum);
+	rm_logf("phoff 0x%llx phentsize %u phnum %u", (unsigned long long)phoff, phentsize, phnum);
 
 	for (uint16_t i = 0; i < phnum; i++) {
 		const uint8_t *ph = elf + phoff + (uint32_t)i * phentsize;
 		uint32_t type  = *(const uint32_t *)ph;
 		uint64_t vaddr = *(const uint64_t *)(ph + 0x10);
 		uint64_t memsz = *(const uint64_t *)(ph + 0x28);
-		plog("  phdr %u: type 0x%08x vaddr 0x%llx memsz 0x%llx", i, type,
+		rm_logf("  phdr %u: type 0x%08x vaddr 0x%llx memsz 0x%llx", i, type,
 		        (unsigned long long)vaddr, (unsigned long long)memsz);
 		if ((type == 0x60000001 || type == 0x60000002) && vaddr) {
 			const proc_prx_info_t *info = (const proc_prx_info_t *)(uint32_t)vaddr;
-			plog("  candidate prx info at %p: magic 0x%08x", info, info->magic);
+			rm_logf("  candidate prx info at %p: magic 0x%08x", info, info->magic);
 			if (info->magic == PRX_INFO_MAGIC) {
-				plog("  prx info: sdk 0x%08x libent 0x%08x-0x%08x libstub 0x%08x-0x%08x",
+				rm_logf("  prx info: sdk 0x%08x libent 0x%08x-0x%08x libstub 0x%08x-0x%08x",
 				        info->sdk_version, info->libent_start, info->libent_end,
 				        info->libstub_start, info->libstub_end);
 				return info;
@@ -691,7 +733,7 @@ static int patch_imports(void)
 {
 	const proc_prx_info_t *info = find_prx_info();
 	if (info == NULL) {
-		plog("prx info not found in executable");
+		rm_logf("prx info not found in executable");
 		return 0;
 	}
 
@@ -699,25 +741,27 @@ static int patch_imports(void)
 	for (uint32_t p = info->libstub_start; p < info->libstub_end; ) {
 		const lib_stub_t *stub = (const lib_stub_t *)p;
 		if (stub->size == 0) {
-			plog("  stub at 0x%08x has size 0, stopping", p);
+			rm_logf("  stub at 0x%08x has size 0, stopping", p);
 			break;
 		}
 		const char *mod = (const char *)stub->module_name;
-		plog("  stub 0x%08x size 0x%02x funcs %u vars %u module '%.40s'",
+		rm_logf("  stub 0x%08x size 0x%02x funcs %u vars %u module '%.40s'",
 		        p, stub->size, stub->num_func, stub->num_var, mod ? mod : "(null)");
 		if (mod && mod[0] == 's' && mod[1] == 'y' && mod[2] == 's' && mod[3] == '_' &&
 		    mod[4] == 'i' && mod[5] == 'o' && mod[6] == '\0') {
 			const uint32_t *nids  = (const uint32_t *)stub->func_nid;
 			const uint32_t *slots = (const uint32_t *)stub->func_table;
 			for (uint16_t f = 0; f < stub->num_func; f++) {
-				plog("    sys_io import %u: nid 0x%08x slot %p -> 0x%08x", f, nids[f], &slots[f], slots[f]);
+				rm_logf("    sys_io import %u: nid 0x%08x slot %p -> 0x%08x", f, nids[f], &slots[f], slots[f]);
+				if (g_n_game_io < MAX_GAME_IO)
+					g_game_io[g_n_game_io++] = nids[f];
 				for (uint32_t h = 0; h < NUM_HOOKS; h++) {
 					if (nids[f] != g_hooks[h].nid || g_hooks[h].slot) continue;
 					g_hooks[h].slot     = (uint32_t)&slots[f];
 					g_hooks[h].original = slots[f];
 					if (g_hooks[h].hook == (void *)hook_GetInfo)
 						g_orig_get_info = slots[f];
-					plog("    hooking nid 0x%08x: slot 0x%08x original OPD 0x%08x hook OPD %p",
+					rm_logf("    hooking nid 0x%08x: slot 0x%08x original OPD 0x%08x hook OPD %p",
 					        g_hooks[h].nid, g_hooks[h].slot, g_hooks[h].original, g_hooks[h].hook);
 					write_u32(g_hooks[h].slot, (uint32_t)g_hooks[h].hook);
 					patched++;
@@ -728,7 +772,7 @@ static int patch_imports(void)
 	}
 	for (uint32_t h = 0; h < NUM_HOOKS; h++)
 		if (!g_hooks[h].slot)
-			plog("  nid 0x%08x not imported by the game, not hooked", g_hooks[h].nid);
+			rm_logf("  nid 0x%08x not imported by the game, not hooked", g_hooks[h].nid);
 	return patched;
 }
 
@@ -792,10 +836,11 @@ static void select_profile(void)
 static void log_stats(void)
 {
 	rm_logf("heartbeat: dev %d intr pipe %d ldd %d port %d | reads %u errs %u submit errs %u bad %u | "
-	        "reports %u changes %u inserts %u insert errs %u | GetInfo %u GetInfo2 %u PeriphInfo %u PeriphData %u",
+	        "reports %u changes %u inserts %u insert errs %u | hook calls: GetData %u GetInfo %u GetInfo2 %u "
+	        "PeriphInfo %u PeriphData %u",
 	        g_dev_id, g_intr_pipe, g_ldd, ldd_port(), g_n_read_done, g_n_read_err, g_n_submit_err,
 	        g_n_bad_report, g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err,
-	        g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data);
+	        g_n_get_data, g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data);
 }
 
 static void riff_thread(uint64_t arg)
@@ -814,10 +859,14 @@ static void riff_thread(uint64_t arg)
 	rm_logf("selecting profile...");
 	select_profile();
 	report(RIFF_STEP_PROFILE, 0);
-	/* patch_imports ran silently in module_start; log what it did. */
+	/* patch_imports ran in module_start, where logging is off; log what it found. */
+	rm_logf("the game imports %u sys_io functions:", g_n_game_io);
+	for (uint32_t i = 0; i < g_n_game_io; i++)
+		rm_logf("  nid 0x%08x %s", g_game_io[i], io_name(g_game_io[i]));
 	for (uint32_t h = 0; h < NUM_HOOKS; h++)
-		rm_logf("import nid 0x%08x: %s, slot 0x%08x, original OPD 0x%08x", g_hooks[h].nid,
-		        g_hooks[h].slot ? "hooked" : "not imported by the game", g_hooks[h].slot, g_hooks[h].original);
+		rm_logf("hook %s (nid 0x%08x): %s, slot 0x%08x, original OPD 0x%08x", io_name(g_hooks[h].nid),
+		        g_hooks[h].nid, g_hooks[h].slot ? "installed" : "not imported by the game, not hooked",
+		        g_hooks[h].slot, g_hooks[h].original);
 	rm_logf("imports patched: %d of %d", g_patched, (int)NUM_HOOKS);
 	report(RIFF_STEP_IMPORTS, g_patched);
 
@@ -866,7 +915,15 @@ static void bootstrap(void)
 	if (g_boot_state != 0 || !__sync_bool_compare_and_swap(&g_boot_state, 0, 1))
 		return;
 	mark(__LINE__, 0);
-	g_log_ok = true;
+	sys_lwmutex_attribute_t attr;
+	sys_lwmutex_attribute_initialize(attr);
+	int lr = sys_lwmutex_create(&g_log_lock, &attr);
+	mark(__LINE__, lr);
+	if (lr == CELL_OK) {
+		g_log_ok = true;
+		g_status.logbuf_addr = (uint32_t)&g_logbuf;
+		push_status();
+	}
 	g_running = true;
 	int r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
 	                              SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");

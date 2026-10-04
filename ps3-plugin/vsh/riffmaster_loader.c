@@ -167,11 +167,49 @@ static const char *step_name(uint32_t step)
 	return step < RIFF_STEP_COUNT ? STEP_NAMES[step] : "?";
 }
 
+/* How much of the game plugin's log buffer has been copied to the log file. */
+static uint32_t g_game_log_addr, g_game_log_read;
+
 static void reset_game_status(void)
 {
 	rm_memset((void *)&g_game_status, 0, sizeof(g_game_status));
 	g_seen_seq = 0;
 	g_report_deadline = 0;
+	g_game_log_addr = g_game_log_read = 0;
+}
+
+/*
+ * Copies new lines from the game plugin's log buffer (riff_logbuf_t in its
+ * memory) into the log file. The lines already carry their timestamp and the
+ * "game" tag, so they can land a little after loader lines from the same time.
+ */
+static void drain_game_log(uint32_t pid)
+{
+	static char buf[4096];
+	uint32_t addr = g_game_status.logbuf_addr, write_pos;
+	if (addr == 0 || pid == 0) return;
+	if (addr != g_game_log_addr) {
+		g_game_log_addr = addr;
+		g_game_log_read = 0;
+	}
+	if (ps3mapi_get_proc_mem(pid, addr, &write_pos, sizeof(write_pos)) != 0) return;
+	if (write_pos - g_game_log_read > RIFF_LOGBUF_SIZE) {
+		rm_logf("game log: %u bytes lost, the game plugin logged faster than the loader copied",
+		        write_pos - g_game_log_read - RIFF_LOGBUF_SIZE);
+		g_game_log_read = write_pos - RIFF_LOGBUF_SIZE;
+	}
+	while (g_game_log_read != write_pos) {
+		uint32_t off = g_game_log_read % RIFF_LOGBUF_SIZE;
+		uint32_t n = write_pos - g_game_log_read;
+		if (n > RIFF_LOGBUF_SIZE - off) n = RIFF_LOGBUF_SIZE - off;
+		if (n > sizeof(buf)) n = sizeof(buf);
+		if (ps3mapi_get_proc_mem(pid, addr + offsetof(riff_logbuf_t, data) + off, buf, n) != 0) {
+			rm_logf("game log: reading the game plugin's log buffer failed");
+			return;
+		}
+		rm_log_write(buf, n);
+		g_game_log_read += n;
+	}
 }
 
 /* Logs new progress from the game plugin and shows the notifications that matter. */
@@ -181,10 +219,9 @@ static void check_game_status(void)
 	rm_memcpy(&s, (const void *)&g_game_status, sizeof(s));
 	if (s.seq != g_seen_seq) {
 		g_seen_seq = s.seq;
-		rm_logf("game plugin: step %u (%s), result 0x%x, profile %c, game log open error 0x%x, "
-		        "log probe %u, mark line %u result 0x%x",
-		        s.step, step_name(s.step), s.result, s.profile ? s.profile : '-', s.log_err,
-		        s.log_probe, s.mark_line, s.mark_result);
+		rm_logf("game plugin: step %u (%s), result 0x%x, profile %c, mark line %u result 0x%x, log buffer 0x%08x",
+		        s.step, step_name(s.step), s.result, s.profile ? s.profile : '-',
+		        s.mark_line, s.mark_result, s.logbuf_addr);
 		if (s.step == RIFF_STEP_READY) {
 			g_report_deadline = 0;
 			const char *guitar = s.profile == 'r' ? "Rock Band" : "Guitar Hero";
@@ -364,10 +401,10 @@ static void peek_game_status(uint32_t pid, int32_t prx_id)
 				/* A match near the end of the chunk may run past it, so read it whole. */
 				riff_status_t st;
 				if (ps3mapi_get_proc_mem(pid, base + off + i * 4, &st, sizeof(st)) != 0) continue;
-				rm_logf("  game plugin status at 0x%08x: seq %u, step %u (%s), result 0x%x, log open error 0x%x,"
-				        " report error 0x%x, module_start args 0x%08x argp 0x%08x, log probe %u, mark line %u result 0x%x",
-				        base + off + i * 4, st.seq, st.step, step_name(st.step), st.result, st.log_err,
-				        st.report_err, st.start_args, st.start_argp, st.log_probe, st.mark_line, st.mark_result);
+				rm_logf("  game plugin status at 0x%08x: seq %u, step %u (%s), result 0x%x, report error 0x%x,"
+				        " module_start args 0x%08x argp 0x%08x, mark line %u result 0x%x, log buffer 0x%08x",
+				        base + off + i * 4, st.seq, st.step, step_name(st.step), st.result,
+				        st.report_err, st.start_args, st.start_argp, st.mark_line, st.mark_result, st.logbuf_addr);
 				if (st.seq == 0)
 					rm_logf("  -> module_start never ran (or never reached its first report)");
 				return;
@@ -535,6 +572,7 @@ static void loader_thread(uint64_t arg)
 				announce_pending = false;
 			}
 			check_game_status();
+			drain_game_log(g_injected_pid);
 
 			if (g_trace) rm_logf("trace: poll #%u", polls);
 			pid = game_pid();
@@ -564,6 +602,7 @@ static void loader_thread(uint64_t arg)
 		} else if (!pid && handled_pid) {
 			rm_logf("game pid 0x%08x is gone, waiting for the next game", handled_pid);
 			handled_pid = 0;
+			g_injected_pid = 0;
 			watch_until = 0;
 		}
 

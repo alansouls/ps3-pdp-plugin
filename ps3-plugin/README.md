@@ -78,8 +78,15 @@ make -C vsh
 
 ## Debugging
 
-Both plugins write to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
+Both plugins log to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
 `http://<ps3-ip>/dev_hdd0/tmp/riffmaster.log`.
+
+The game process isn't allowed to open that file (`EACCES`, `0x80010029`). The game plugin writes its lines into a
+64 KB buffer in its own memory instead, and the loader copies new lines into the file on every poll (every 1–2 s),
+so `game` lines can appear slightly after `loader` lines from the same moment. Nothing from the game plugin is
+logged before its thread starts (see "How the game plugin starts"). The thread then logs which `sys_io` functions
+the game imports and which hooks were installed. The game plugin's heartbeat counts the calls to each hook
+(`hook calls: GetData N GetInfo N ...`), and each hook logs its first 5 calls, then every 1000th.
 
 - **One log per boot.** When the loader starts within 90 s of power-on, it moves the previous
   log to `riffmaster.old.log` and starts a fresh one. After a freeze and a hard power-off, the

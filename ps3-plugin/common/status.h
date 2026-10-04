@@ -49,16 +49,29 @@ typedef struct {
 	uint32_t seq;      /* bumped on every report */
 	uint32_t step;     /* RIFF_STEP_*: the last step reached */
 	int32_t  result;   /* that step's return code */
-	int32_t  log_err;  /* last error opening the log file in the game, 0 if logging works */
 	char     profile;  /* 'g' or 'r' once the profile is selected */
 	char     pad[3];
 	/* For when reports don't reach the loader: */
 	int32_t  report_err;  /* last ps3mapi_set_proc_mem result, 0 if it worked */
 	uint32_t start_args;  /* module_start's args and argp, as received */
 	uint32_t start_argp;
-	uint32_t log_probe;   /* last RIFF_LOG_PROBE point reached inside rm_logf (see util.h) */
 	uint32_t mark_line;   /* source line of the last mark() in the game plugin */
 	int32_t  mark_result; /* result recorded with it */
+	uint32_t logbuf_addr; /* the game plugin's riff_logbuf_t, 0 until logging starts */
 } riff_status_t;
+
+/*
+ * The game plugin's log lines. It can't write files, so rm_logf appends here
+ * and the loader copies new bytes into the log file with PS3MAPI GET_PROC_MEM.
+ * data is a ring: byte i of the stream is at data[i % RIFF_LOGBUF_SIZE].
+ * write_pos counts every byte ever written and is updated after the bytes, so
+ * everything before it is complete.
+ */
+#define RIFF_LOGBUF_SIZE 0x10000
+
+typedef struct {
+	uint32_t write_pos;
+	char     data[RIFF_LOGBUF_SIZE];
+} riff_logbuf_t;
 
 #endif
