@@ -1,0 +1,3 @@
+
+/dev_hdd0/plugins/webftp_server.sprx
+/dev_hdd0/plugins/riffmaster_loader.sprx

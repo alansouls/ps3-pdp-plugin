@@ -281,10 +281,13 @@ static int rm_attach(int32_t dev_id)
 	if (cfg == NULL || g_intr_ep == NULL)
 		return CELL_USBD_ATTACH_FAILED;
 
-	if (g_buf == NULL && cellUsbdAllocateMemory((void **)&g_buf, RM_REPORT_SIZE) != CELL_OK) {
-		rm_log("cellUsbdAllocateMemory failed");
-		g_buf = NULL;
-		return CELL_USBD_ATTACH_FAILED;
+	if (g_buf == NULL) {
+		void *mem = NULL;
+		if (cellUsbdAllocateMemory(&mem, RM_REPORT_SIZE) != CELL_OK || mem == NULL) {
+			rm_log("cellUsbdAllocateMemory failed");
+			return CELL_USBD_ATTACH_FAILED;
+		}
+		g_buf = (uint8_t *)mem;
 	}
 
 	g_dev_id = dev_id;
@@ -327,9 +330,27 @@ static CellUsbdLddOps g_ldd_ops = { "riffmaster", rm_probe, rm_attach, rm_detach
 #define GUITAR_CAPABILITY (CELL_PAD_CAPABILITY_PS3_CONFORMITY | \
 	CELL_PAD_CAPABILITY_PRESS_MODE | CELL_PAD_CAPABILITY_SENSOR_MODE)
 
+/*
+ * cellPadGetInfo and CellPadInfo were dropped from newer SDKs (no stub to link
+ * against), but older games such as GH3 still import them. Use the legacy
+ * layout and call the game's original import through its saved OPD.
+ */
+#define LEGACY_MAX_PADS 127
+typedef struct {
+	uint32_t max_connect;
+	uint32_t now_connect;
+	uint32_t system_info;
+	uint16_t vendor_id[LEGACY_MAX_PADS];
+	uint16_t product_id[LEGACY_MAX_PADS];
+	uint8_t  status[LEGACY_MAX_PADS];
+} CellPadInfo;
+
+typedef int32_t (*pad_get_info_fn)(CellPadInfo *info);
+static uint32_t g_orig_get_info;  /* set by patch_imports */
+
 static int32_t hook_GetInfo(CellPadInfo *info)
 {
-	int32_t r = cellPadGetInfo(info);
+	int32_t r = ((pad_get_info_fn)g_orig_get_info)(info);
 	int32_t port = ldd_port();
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->vendor_id[port]  = g_profile->vid;
@@ -375,12 +396,12 @@ static int32_t hook_PeriphGetData(uint32_t port_no, CellPadPeriphData *data)
 	CellPadData pad;
 	build_pad_data(&s, &pad);
 	rm_memset(data, 0, sizeof(*data));
-	rm_memcpy(data->cellpad_data.button, pad.button, sizeof(pad.button));
-	data->pclass_type       = CELL_PAD_PCLASS_TYPE_GUITAR;
-	data->pclass_profile    = GUITAR_PROFILE_BITS;
-	data->cellpad_data.len  = CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_TILT_SENS + 1;
+	rm_memcpy(data->button, pad.button, sizeof(pad.button));
+	data->pclass_type    = CELL_PAD_PCLASS_TYPE_GUITAR;
+	data->pclass_profile = GUITAR_PROFILE_BITS;
+	data->len            = CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_TILT_SENS + 1;
 
-	uint16_t *b = data->cellpad_data.button;
+	uint16_t *b = data->button;
 	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_FRET_1]     = (s.frets & RM_FRET_GREEN)  ? 0xFF : 0;
 	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_FRET_2]     = (s.frets & RM_FRET_RED)    ? 0xFF : 0;
 	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_FRET_3]     = (s.frets & RM_FRET_YELLOW) ? 0xFF : 0;
@@ -500,6 +521,8 @@ static int patch_imports(void)
 					if (nids[f] != g_hooks[h].nid || g_hooks[h].slot) continue;
 					g_hooks[h].slot     = (uint32_t)&slots[f];
 					g_hooks[h].original = slots[f];
+					if (g_hooks[h].hook == (void *)hook_GetInfo)
+						g_orig_get_info = slots[f];
 					write_u32(g_hooks[h].slot, (uint32_t)g_hooks[h].hook);
 					rm_logx("hooked nid", g_hooks[h].nid);
 					patched++;

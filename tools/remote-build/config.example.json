@@ -1,0 +1,19 @@
+{
+  "server_host": "192.168.1.195",
+  "port": 8765,
+  "token": "change-me",
+
+  "server": {
+    "bind": "0.0.0.0",
+    "allowed_networks": ["192.168.0.0/16", "127.0.0.0/8"],
+    "remote_url": "https://github.com/alansouls/ps3-pdp-plugin",
+    "repo_dir": "~/.ps3-remote-build/ps3-pdp-plugin",
+    "make_cmd": "make",
+    "make_timeout": 600,
+    "make_dirs": ["ps3-plugin/game", "ps3-plugin/vsh"],
+    "artifacts": [
+      "ps3-plugin/game/riffmaster_game.sprx",
+      "ps3-plugin/vsh/riffmaster_loader.sprx"
+    ]
+  }
+}

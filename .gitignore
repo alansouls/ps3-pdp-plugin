@@ -1,0 +1,7 @@
+# Build outputs (the .sprx files are committed by the remote build server)
+ps3-plugin/*/objs/
+ps3-plugin/*/*.prx
+ps3-plugin/*/*.sym
+
+# Local remote-build config (contains the shared token)
+tools/remote-build/config.json
