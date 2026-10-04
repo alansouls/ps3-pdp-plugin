@@ -862,6 +862,7 @@ int riff_start(size_t args, void *argp)
 	push_status();
 
 	g_running = true;
+	mark(__LINE__, 0);
 	int r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
 	                              SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
 	mark(__LINE__, r);
