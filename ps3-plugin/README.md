@@ -1,147 +1,185 @@
-# Riffmaster → PS3 guitar plugin
+# Riffmaster PS3 plugins: technical reference
 
-Makes a **PDP Riffmaster (PS4)** guitar work as a PS3 guitar in Guitar Hero III, World Tour, GH5,
-Metallica, Smash Hits, Warriors of Rock and Rock Band 1–3. It needs Evilnat CFW with Cobra and webMAN MOD.
-The guitar plugs into the PS3 directly over USB.
+This is how the two plugins work, and how to debug them. For what the project does, which games it works with,
+how to install it and how to build it, see the [repository README](../README.md).
 
-## How it works
+## The two plugins
 
-| Piece | Runs in | Job |
+| Plugin | Runs in | Job |
 | --- | --- | --- |
-| `riffmaster_loader.sprx` | VSH (`boot_plugins.txt`) | Asks VSH for the running game's process ID (`GetGameProcessID`, as webMAN MOD does) and injects the game plugin through Cobra PS3MAPI after 8 s. |
-| `riffmaster_game.sprx` | Game process | Opens the Riffmaster through `cellUsbd`. Converts each report using `../riffmaster_report_map.md`. Feeds a virtual pad through `cellPadLdd`. Redirects the game's `cellPadGetInfo/GetInfo2/PeriphGetInfo/PeriphGetData` imports so that pad reports as a guitar. |
+| `riffmaster_loader.sprx` (`vsh/`) | VSH, from `boot_plugins.txt` | Detects games, injects the game plugin, shows XMB notifications, and writes both plugins' logs. |
+| `riffmaster_game.sprx` (`game/`) | The game process | Hooks the game's `cellPad` imports, drives the Riffmaster over `cellUsbd`, and hands the game guitar input. |
 
-### How the game plugin starts
+`common/` holds code both use: Cobra PS3MAPI calls (`ps3mapi.h`), libc-free helpers and logging (`util.h`), and
+the status and log-buffer formats the two plugins share (`status.h`).
 
-Cobra runs the game plugin's `module_start` on a thread its kernel code creates. Calls into liblv2 never return on
-that thread (`sys_ppu_thread_get_id`, `sys_ppu_thread_create`), so `module_start` only makes direct syscalls: it
-takes the loader's argument, reports to the loader, and hooks the game's `cellPad` imports (including
-`cellPadGetData`, which games call every frame). The first hooked call runs on one of the game's own threads, and
-that is where the plugin starts `riff_thread`, which does all the logging and USB setup.
+## Loader
 
-### XMB notifications
+1. **Game detection.** Every 2 s, the loader calls VSH's own exports `GetCooperationMode` (`vshmain_EB757101`,
+   0 on the XMB) and `GetGameProcessID` (`vshmain_0624D3AE`), like webMAN MOD. It finds them, and `vshtask_notify`
+   and `paf`'s `View_Find`, in the VSH export table at `*(0x1008C) + 0x984`, the same lookup as webMAN MOD's
+   `getNIDfunc`.
 
-| When | Message |
+   Don't use PS3MAPI's process list for this: an earlier version called `GET_ALL_PROC_PID` every 2 s, and that
+   call hung the whole console when it ran while a game was starting.
+2. **Injection.** 8 s after a game appears, the loader calls PS3MAPI `LOAD_PROC_MODULE` with
+   `/dev_hdd0/plugins/riffmaster_game.sprx` and a `riff_arg_t`: its own process ID and the address of a
+   `riff_status_t` in its memory.
+3. **Watching.** Every poll, it logs any change to that status, copies new game-plugin log lines into the log file
+   and shows notifications. If setup hasn't finished 20 s after injection, it says where it stopped. It also lists
+   the game's modules, reads the game plugin's status straight from game memory, and checks that the game plugin's
+   imports are linked.
+
+## Game plugin
+
+### Starting
+
+Cobra runs `module_start` on a thread created by its kernel code. On that thread, calls into liblv2 never return
+(seen on hardware with `sys_ppu_thread_get_id` and `sys_ppu_thread_create`), so `riff_start` only makes direct
+syscalls:
+
+1. It takes the loader's argument. Cobra passes it as the **first** parameter (`args`); `argp` holds `0xc8`. It is
+   read through PS3MAPI `GET_PROC_MEM`, so a bad pointer returns an error instead of crashing.
+2. It reports step 1 to the loader.
+3. It hooks the game's `sys_io` imports (`patch_imports`). It finds the game executable's import stubs through the
+   `sys_process_prx_info` segment of the ELF mapped at `0x10000`, and writes each hook's address into the import
+   slot with PS3MAPI `SET_PROC_MEM`.
+
+The first time the game calls a hooked function, the call runs on one of the game's own threads. `bootstrap()`
+creates the log lock and starts `riff_thread` there, once. Logging is off until then.
+
+### Hooks
+
+| Game import | Hook does |
 | --- | --- |
-| Loader starts (after the XMB appears, or 30 s at most) | `Riffmaster loader loaded` |
-| A game process is detected | `Riffmaster: game found, loading guitar plugin in 8s` |
-| `ps3mapi_load_proc_module` fails | `Riffmaster: failed to load guitar plugin (0x...)` |
-| Game plugin finished setup | `Riffmaster plugin loaded (Guitar Hero guitar)` / `(Rock Band guitar)`, or `... but USB setup failed (0x...)` |
-| Game plugin attached the guitar | `Riffmaster guitar connected` / `Riffmaster guitar attach failed (0x...)` |
-| Setup not finished 20 s after injection | `Riffmaster: guitar plugin didn't report back`, or `Riffmaster: plugin stopped after '<step>' (0x...)` |
+| `cellPadGetData` | Starts the plugin on the first call. On the guitar's port, hands the game the current guitar state whenever it changed since the game's last read; otherwise reports `len 0`, as the pad library does. |
+| `cellPadGetInfo` | Reports the guitar's port as `12BA:0100` (GH) or `12BA:0200` (RB). Older games such as GH3 still import this, so it uses the legacy `CellPadInfo` layout. |
+| `cellPadGetInfo2` | Reports the guitar's port as a standard pad with press and sensor modes. |
+| `cellPadPeriphGetInfo`, `cellPadPeriphGetData` | Report the guitar's port as a guitar peripheral with its fret, strum, whammy and tilt values. None of the tested games import these. |
 
-Notifications can only be shown from VSH, which the loader runs in. It finds `vshtask_notify` in the VSH export
-table the same way webMAN MOD does. The game plugin can't call it from inside the game process, so it reports to the
-loader instead (see `common/status.h`):
+A game that doesn't import a function simply doesn't get that hook. The tested games import `cellPadGetData`,
+`cellPadGetInfo` and `cellPadGetInfo2` (3 of 5).
 
-1. When injecting, the loader passes its process ID and the address of a status struct as `module_start`'s argument.
-2. After each setup step, the game plugin writes that struct into the loader's memory with PS3MAPI `SET_PROC_MEM`.
-3. The loader logs every step as `game plugin: step N (...)` and shows the notifications above.
+### USB and the virtual pad
 
-This doesn't touch the filesystem, so it works even if the game process can't write the log. The status also
-carries the error code from the game plugin's last attempt to open the log file (`game log open error`).
+`riff_thread` loads the USBD module, calls `cellUsbdInit` and registers an extra USB driver for vendor `0E6F` with
+`cellUsbdRegisterExtraLdd2`. When the Riffmaster (`0E6F:024A`) attaches, it opens the first HID interrupt-IN
+endpoint and keeps one 64-byte read pending. Each report is decoded as described in
+[`../riffmaster_report_map.md`](../riffmaster_report_map.md).
 
-VSH plugins reload when you quit a game, so "loader loaded" also appears each time you return to the XMB.
+On the first report it registers a virtual pad with `cellPadLddRegisterController`, which gives the guitar its own
+port. It also passes each change to `cellPadLddDataInsert`. In GH Metallica that data never reached the game's
+`cellPadGetData` (every read of the port returned `len 0`), so the `cellPadGetData` hook hands the game the frames
+itself.
 
 ### Button mapping
 
-| Riffmaster | PS3 guitar |
-| --- | --- |
-| Green / Red / Yellow / Blue / Orange | Cross / Circle / Square / Triangle / L1 |
-| Strum up / down | D-pad up / down |
-| Start / Select | Start / Select |
-| Whammy (byte 44) | Right stick X |
-| Tilt (byte 45) | Sensor X. Past `0x80` it also presses Select, which deploys star power or overdrive. |
-| PS button | Not forwarded. Use a DS3 for the XMB. |
+| Riffmaster | Sent as | Source in the report |
+| --- | --- | --- |
+| Green / Red / Yellow / Blue / Orange | Cross / Circle / Square / Triangle / L1 | byte 46 bits `0x01`–`0x10` |
+| Strum up / down | D-pad up / down | byte 5 low nibble (hat) `0` / `4` |
+| Start / Select | Start / Select | byte 6 `0x20` / `0x10` |
+| Whammy | Right stick X, `0x7F` at rest to `0xFF` | byte 44 |
+| Tilt | Sensor X, `0x200` level to `0x180` tilted; also presses Select above `0x80` (released below `0x50`) | byte 45 |
+| PS button | Not forwarded | byte 7 `0x01` |
 
-The guitar ID depends on the game. Titles whose `PARAM.SFO` contains "Rock Band" get `0x12BA:0x0200` (RB guitar). Every other game gets `0x12BA:0x0100` (GH guitar). Override this with `riffmaster.cfg`.
+A real PS3 Guitar Hero guitar reports Yellow as Square and Blue as Triangle; this was confirmed in GH Metallica.
+The whammy and tilt ranges are set per profile in `PROFILE_GH` and `PROFILE_RB`.
 
-## Build
+## Status, notifications and logs
 
-Requires the official PS3 SDK (`CELL_SDK` set, with `make_fself` on the PATH).
+### Progress reports
 
-```sh
-export CELL_SDK=/path/to/cell
-make -C game
-make -C vsh
-```
+`riff_status_t` (`common/status.h`) carries the last setup step and its result, plus debugging fields. After each
+step, the game plugin writes its copy into the loader's memory with PS3MAPI `SET_PROC_MEM`. That needs no files and
+no liblv2, so it works from `module_start` too. The game plugin's own copy starts with the signature `RIFF` `STAT`,
+so the loader can also find and read it in game memory if reports stop arriving.
 
-## Install
+Steps: 1 `module_start` → 2 thread started → 3 profile selected → 4 imports hooked → 5 USBD module loaded →
+6 `cellUsbdInit` → 7 setup done → 8 guitar attached → 9 first input report.
 
-1. Copy `game/riffmaster_game.sprx` and `vsh/riffmaster_loader.sprx` to `/dev_hdd0/plugins/`.
-2. Optional: copy `riffmaster.cfg` to `/dev_hdd0/plugins/`.
-3. Add this line to `/dev_hdd0/boot_plugins.txt`:
-   ```
-   /dev_hdd0/plugins/riffmaster_loader.sprx
-   ```
-4. Reboot. Plug the Riffmaster in by USB, then start the game from webMAN.
+### XMB notifications
+
+Only VSH can show notifications, so the loader shows them, including the ones about the game plugin's progress.
+`notifications=` in `riffmaster.cfg` chooses which ones appear: `2` = all (default), `1` = only failures, `0` =
+none. Every message is logged either way, with `(not shown, ...)` when it was suppressed.
+
+| When | Message | Shown at |
+| --- | --- | --- |
+| Loader started (once the XMB is up, or after 30 s) | `Riffmaster loader loaded` | 2 |
+| Game detected | `Riffmaster: game found, loading guitar plugin in 8s` | 2 |
+| Game plugin finished setup | `Riffmaster plugin loaded (Guitar Hero guitar)` / `(Rock Band guitar)` | 2 |
+| Guitar attached | `Riffmaster guitar connected` | 2 |
+| VSH exports for game detection not found | `Riffmaster loader: can't detect games on this firmware` | 1, 2 |
+| `LOAD_PROC_MODULE` failed | `Riffmaster: failed to load guitar plugin (0x...)` | 1, 2 |
+| USB setup failed | `Riffmaster plugin loaded, but USB setup failed (0x...)` | 1, 2 |
+| Guitar attach failed | `Riffmaster guitar attach failed (0x...)` | 1, 2 |
+| Setup not finished 20 s after injection | `Riffmaster: guitar plugin didn't report back` / `Riffmaster: plugin stopped after '<step>' (0x...)` | 1, 2 |
+
+### Game plugin log relay
+
+The game process isn't allowed to open files in `/dev_hdd0/tmp` (`EACCES`, `0x80010029`). The game plugin
+overrides `rm_logf`'s output (`RIFF_LOG_SINK`): each line goes into a 64 KB ring buffer (`riff_logbuf_t`) in its
+memory, and the buffer's address goes out with the status. On every poll, the loader reads new bytes with PS3MAPI
+`GET_PROC_MEM` and appends them to the log file.
 
 ## Debugging
 
-Both plugins log to `/dev_hdd0/tmp/riffmaster.log`. Fetch it with webMAN at
-`http://<ps3-ip>/dev_hdd0/tmp/riffmaster.log`.
+Both plugins log to `/dev_hdd0/tmp/riffmaster.log` (with webMAN: `http://<ps3-ip>/dev_hdd0/tmp/riffmaster.log`).
 
-The game process isn't allowed to open that file (`EACCES`, `0x80010029`). The game plugin writes its lines into a
-64 KB buffer in its own memory instead, and the loader copies new lines into the file on every poll (every 1–2 s),
-so `game` lines can appear slightly after `loader` lines from the same moment. Nothing from the game plugin is
-logged before its thread starts (see "How the game plugin starts"). The thread then logs which `sys_io` functions
-the game imports and which hooks were installed. The game plugin's heartbeat counts the calls to each hook
-(`hook calls: GetData N GetInfo N ...`), and each hook logs its first 5 calls, then every 1000th.
-
-- **One log per boot.** When the loader starts within 90 s of power-on, it moves the previous
-  log to `riffmaster.old.log` and starts a fresh one. After a freeze and a hard power-off, the
-  log for the run that froze is in **`riffmaster.old.log`**.
-- **Survives power loss.** Each line is `fsync`ed before the plugin moves on. The last line in
-  the log is the last thing the plugin finished before the console died.
-- **Size limit.** Once the log reaches 1 MB it is emptied and restarted with a
-  `log reached size limit` marker, so the newest lines are kept.
-- **Line format.** `[uptime s.us] loader|game t<thread id>: message`.
-- **Heartbeats.** The loader logs once a second for 90 s after injecting. The game plugin logs
-  its counters every 2 s for the first minute, then every 15 s. When both stop at the same
-  time, the whole console froze. When only the game heartbeat stops, the game process died.
-- Hot paths are rate-limited. The game hooks log their first 5 calls, then every 1000th. USB
-  reports log the first 8 as hex dumps, then the first 300 button changes, then every 100th.
+- **Line format.** `[uptime s.us] loader|game t<thread id>: message`. Game lines reach the file 1–2 s after they
+  were written, so they can come after loader lines from the same moment.
+- **One log per boot.** When the loader starts within 90 s of power-on, it moves the previous log to
+  `riffmaster.old.log`. After a freeze and a hard power-off, the run that froze is in `riffmaster.old.log`.
+- **Power loss.** The loader `fsync`s every line it writes, including the game lines it copies. Game lines still
+  in the game plugin's buffer (the last 1–2 s) are lost if the console dies.
+- **Size limit.** At 1 MB the log is emptied and restarted with a `log reached size limit` marker.
+- **Heartbeats.** The loader logs once a second for 90 s after injecting, then every 30 s. The game plugin logs its
+  counters every 2 s for a minute, then every 15 s: USB reads and errors, reports, state changes, the calls to each
+  hook, and `game reads of the guitar port N, new data from the pad library N, frames handed to the game N`. If
+  both stop at the same time, the whole console froze. If only the game's stops, the game process died.
+- **Rate limits.** Hooks log their first 5 calls, then every 1000th. The first 60 frames handed to the game are
+  logged (`guitar port N -> game #N: ...`), then every 100th. USB reports: the first 8 as hex dumps, then the first
+  300 button changes, then every 100th.
 
 ### Finding what freezes the console
 
-Two settings in `riffmaster.cfg` help when the console freezes and the log doesn't say why:
+- `debug_stage=0..2` in `riffmaster.cfg` turns the loader's work on one step at a time:
+  - `0`: only logs; no VSH or PS3MAPI calls, no notifications
+  - `1`: adds notifications and game detection, without injecting
+  - `2`: normal operation
 
-- `debug_stage=0..2` turns the loader's work on one step at a time. `0` only logs. `1` adds notifications and
-  game detection without injecting. `2` is normal operation. Reboot, launch the game, and the first stage that
-  freezes is where the problem is.
-- `trace=1` logs before and after every call the loader's poll makes. If the last line in `riffmaster.old.log`
-  is a `trace: ...` line without its matching `returned` line, that call hung.
+  The first stage that freezes is where the problem is.
+- `trace=1` logs before and after every call the loader's poll makes. If the last line in `riffmaster.old.log` is
+  a `trace: ...` line without its `returned` line, that call hung.
 
-The loader detects games through VSH's own `GetCooperationMode` and `GetGameProcessID` exports, not PS3MAPI.
-An earlier version listed processes with PS3MAPI `GET_ALL_PROC_PID` every 2 s, and that call hung the whole
-console when it ran while a game was starting.
+### A healthy run
 
-A healthy run looks roughly like this:
+Abbreviated, from GH Metallica:
 
 ```
-=== new boot, riffmaster_loader starting ... ===
-game process found: pid 0x..., waiting 8s before injecting
-calling ps3mapi_load_proc_module(pid 0x..., /dev_hdd0/plugins/riffmaster_game.sprx)...
-riff_start: module_start in pid 0x...
-ps3mapi_load_proc_module returned 0 (0x0)
-riffmaster_game thread started
-profile: gh (0x12ba:0x0100)
-reading ELF header at 0x00010000... (phdrs, lib stubs, every sys_io import)
-hooking nid 0x3aaad464 ... / write_u32 ... / readback ...
-imports patched: 4 of 4
-cellUsbdRegisterExtraLdd2 returned 0x0
-probe: dev N ... attach: dev N ... set_config_done ... interrupt pipe N
-report #0 ... (hex dump)
-registering virtual pad ... virtual pad port N
-heartbeat: ...
+loader: game process found: pid 0x01030200, waiting 8s before injecting
+loader: calling ps3mapi_load_proc_module(pid 0x01030200, /dev_hdd0/plugins/riffmaster_game.sprx), arg: ...
+loader: ps3mapi_load_proc_module returned 0 (0x0)
+loader: game plugin: step 1 (module_start), result 0x0, profile g, mark line ... result 0x3, log buffer 0x00000000
+game:   riffmaster_game thread started, loader arg ok, ...
+game:   profile: gh (0x12ba:0x0100)
+game:   the game imports 12 sys_io functions: ...
+game:   hook cellPadGetData (nid 0x8b72cda1): installed, ...
+game:   imports patched: 3 of 5
+game:   cellUsbdRegisterExtraLdd2 returned 0x0
+loader: game plugin: step 7 (setup done), ...
+loader: notify: 'Riffmaster plugin loaded (Guitar Hero guitar)'
+game:   probe: dev 8 accepted / attach: dev 8 / interrupt pipe 1
+loader: notify: 'Riffmaster guitar connected'
+game:   registering virtual pad ... / GetInfo as the game sees it: port 1 vid 0x12ba pid 0x0100 ...  <- guitar
+game:   guitar port 1 -> game #1: len 24, digital ...
 ```
 
-## Needs verifying on hardware
+## Open items
 
-None of this has been compiled or run yet. Check these first:
-
-1. **Riffmaster PID.** `RM_PID_MIN/MAX` in `game/riffmaster_game.c` currently accept any PDP device. Set them to the guitar's exact PID.
-2. **Whammy range.** The code assumes the game wants right stick X to rest at `0x7F` and reach `0xFF` at full whammy. If sustains don't bend, adjust `whammy_rest/whammy_full` in `PROFILE_GH`/`PROFILE_RB`.
-3. **Tilt range.** The code assumes sensor X goes from `0x200` (level) to `0x180` (tilted). Tilt also triggers Select, so star power works even if this range is wrong.
-4. **SDK names.** The code expects `cellUsbdSetConfiguration`, `cellUsbdAllocateMemory` and the `CELL_PAD_PCLASS_*` guitar constants to exist in your SDK version. If one is missing, the compiler will report it.
-5. **Import hooking.** This relies on the game's ELF header being mapped at `0x10000`. If the log says `prx info not found`, the guitar will still send input but won't be identified as a guitar.
+- `RM_PID_MIN/MAX` in `game/riffmaster_game.c` accept any PDP device. The Riffmaster is `0E6F:024A`.
+- `riff_stop` still logs. If Cobra runs it on the same kind of kernel thread as `module_start`, unloading the game
+  plugin while the game runs would hang.
+- `cellPadLddDataInsert` data doesn't reach the game (see above). The virtual pad is still needed for the port it
+  provides.

@@ -31,8 +31,10 @@ SYS_MODULE_STOP(loader_stop);
 /* Otherwise, log a heartbeat every this many polls. */
 #define HEARTBEAT_POLLS   15
 /*
- * VSH plugins also load again when returning from a game, without a reboot.
- * If the system has been up for less than this, treat it as a fresh boot.
+ * The loader stays loaded across games (seen on hardware), but it can be
+ * loaded again in the same boot, e.g. by unloading and reloading it with
+ * webMAN. If the system has been up for less than this, treat it as a fresh
+ * boot and start a new log; otherwise append.
  */
 #define FRESH_BOOT_US     (90ULL * 1000000)
 
@@ -124,8 +126,19 @@ static bool xmb_ready(void)
 	return g_view_find && g_view_find("explore_plugin") != 0;
 }
 
-/* Shows an XMB notification and logs it. */
-static void notify(const char *fmt, ...)
+/*
+ * notifications= in riffmaster.cfg: which XMB notifications to show. Every
+ * message is logged either way.
+ */
+enum {
+	NOTIFY_OFF     = 0,
+	NOTIFY_PROBLEM = 1,  /* only failures */
+	NOTIFY_ALL     = 2,  /* also progress: loaded, game found, guitar connected (the default) */
+};
+static int g_notify_level = NOTIFY_ALL;
+
+/* Shows an XMB notification (if notifications= allows its level) and logs it. */
+static void notify(int level, const char *fmt, ...)
 {
 	char msg[NOTIFY_MAX];
 	rm_buf_t b = { msg, 0, sizeof(msg) - 1 };
@@ -135,8 +148,10 @@ static void notify(const char *fmt, ...)
 	va_end(ap);
 	msg[b.n] = '\0';
 
-	rm_logf("notify: '%s'%s", msg, g_vshtask_notify ? "" : "  <- vshtask_notify not found, not shown");
-	if (g_vshtask_notify)
+	bool show = g_notify_level >= level;
+	rm_logf("notify: '%s'%s", msg, !show ? "  (not shown, notifications disabled for this level)" :
+	        g_vshtask_notify ? "" : "  <- vshtask_notify not found, not shown");
+	if (show && g_vshtask_notify)
 		g_vshtask_notify(0, msg);
 }
 
@@ -226,11 +241,14 @@ static void check_game_status(void)
 			g_report_deadline = 0;
 			const char *guitar = s.profile == 'r' ? "Rock Band" : "Guitar Hero";
 			if (s.result == 0)
-				notify("Riffmaster plugin loaded (%s guitar)", guitar);
+				notify(NOTIFY_ALL, "Riffmaster plugin loaded (%s guitar)", guitar);
 			else
-				notify("Riffmaster plugin loaded, but USB setup failed (0x%x)", s.result);
+				notify(NOTIFY_PROBLEM, "Riffmaster plugin loaded, but USB setup failed (0x%x)", s.result);
 		} else if (s.step == RIFF_STEP_ATTACHED) {
-			notify(s.result == 0 ? "Riffmaster guitar connected" : "Riffmaster guitar attach failed (0x%x)", s.result);
+			if (s.result == 0)
+				notify(NOTIFY_ALL, "Riffmaster guitar connected");
+			else
+				notify(NOTIFY_PROBLEM, "Riffmaster guitar attach failed (0x%x)", s.result);
 		}
 	}
 	if (g_report_deadline && uptime_sec() >= g_report_deadline) {
@@ -242,10 +260,10 @@ static void check_game_status(void)
 		}
 		if (s.seq == 0) {
 			rm_logf("game plugin sent no progress report within %ds of injection", REPORT_TIMEOUT_SEC);
-			notify("Riffmaster: guitar plugin didn't report back");
+			notify(NOTIFY_PROBLEM, "Riffmaster: guitar plugin didn't report back");
 		} else {
 			rm_logf("game plugin stopped at step %u (%s), result 0x%x", s.step, step_name(s.step), s.result);
-			notify("Riffmaster: plugin stopped after '%s' (0x%x)", step_name(s.step), s.result);
+			notify(NOTIFY_PROBLEM, "Riffmaster: plugin stopped after '%s' (0x%x)", step_name(s.step), s.result);
 		}
 	}
 }
@@ -275,10 +293,12 @@ static void load_cfg(void)
 	if (n > 0) {
 		g_stage = rm_cfg_int(buf, n, "debug_stage", STAGE_INJECT);
 		g_trace = rm_cfg_int(buf, n, "trace", 0) != 0;
+		g_notify_level = rm_cfg_int(buf, n, "notifications", NOTIFY_ALL);
 	}
 	if (g_stage > STAGE_INJECT) g_stage = STAGE_INJECT;
-	rm_logf("%s: read %d bytes, debug_stage %d%s, trace %d", RIFF_CFG_PATH, n, g_stage,
-	        g_stage == STAGE_INJECT ? " (normal)" : "", g_trace);
+	if (g_notify_level > NOTIFY_ALL) g_notify_level = NOTIFY_ALL;
+	rm_logf("%s: read %d bytes, debug_stage %d%s, trace %d, notifications %d", RIFF_CFG_PATH, n, g_stage,
+	        g_stage == STAGE_INJECT ? " (normal)" : "", g_trace, g_notify_level);
 }
 
 /*
@@ -529,7 +549,7 @@ static void inject(uint32_t pid)
 	int r = ps3mapi_load_proc_module(pid, GAME_PLUGIN_PATH, &arg, sizeof(arg));
 	rm_logf("ps3mapi_load_proc_module returned %d (0x%x)%s", r, r, r == 0 ? "" : "  <- FAILED");
 	if (r != 0) {
-		notify("Riffmaster: failed to load guitar plugin (0x%x)", r);
+		notify(NOTIFY_PROBLEM, "Riffmaster: failed to load guitar plugin (0x%x)", r);
 	} else {
 		g_injected_pid = pid;
 		g_report_deadline = uptime_sec() + REPORT_TIMEOUT_SEC;
@@ -564,11 +584,11 @@ static void loader_thread(uint64_t arg)
 			/* Notifications sent before the XMB is up are lost, so wait for it (or give up waiting). */
 			if (announce_pending && (xmb_ready() || uptime_sec() >= announce_deadline)) {
 				if (g_running_mode == NULL || g_game_pid == NULL)
-					notify("Riffmaster loader: can't detect games on this firmware");
+					notify(NOTIFY_PROBLEM, "Riffmaster loader: can't detect games on this firmware");
 				else if (g_stage >= STAGE_INJECT)
-					notify("Riffmaster loader loaded");
+					notify(NOTIFY_ALL, "Riffmaster loader loaded");
 				else
-					notify("Riffmaster loader loaded (debug stage %d)", g_stage);
+					notify(NOTIFY_ALL, "Riffmaster loader loaded (debug stage %d)", g_stage);
 				announce_pending = false;
 			}
 			check_game_status();
@@ -582,10 +602,10 @@ static void loader_thread(uint64_t arg)
 			handled_pid = pid;
 			if (g_stage < STAGE_INJECT) {
 				rm_logf("game process found: pid 0x%08x, not injecting (debug_stage %d)", pid, g_stage);
-				notify("Riffmaster: game found (debug stage %d, not loading the plugin)", g_stage);
+				notify(NOTIFY_ALL, "Riffmaster: game found (debug stage %d, not loading the plugin)", g_stage);
 			} else {
 				rm_logf("game process found: pid 0x%08x, waiting %ds before injecting", pid, INJECT_DELAY_SEC);
-				notify("Riffmaster: game found, loading guitar plugin in %ds", INJECT_DELAY_SEC);
+				notify(NOTIFY_ALL, "Riffmaster: game found, loading guitar plugin in %ds", INJECT_DELAY_SEC);
 				sleep_while_running(INJECT_DELAY_SEC);
 				if (!g_running) {
 					rm_logf("stop requested during inject delay");

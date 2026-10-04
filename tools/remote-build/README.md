@@ -44,8 +44,16 @@ python3 tools/remote-build/build.py --push    # push local commits first, then b
 Other flags: `--branch NAME`, `--force` (rebuild even if the branch tip is already a build
 commit), `--no-pull` (don't pull the binaries afterwards).
 
+## Why it exists
+
+The PS3 SDK is installed on a Windows PC, but the code is edited on a Mac. Instead of copying sources over and
+running `make` there by hand, `build.py` asks the Windows PC to build whatever is pushed, and the built `.sprx` files
+come back as a normal commit. That also means the repository always holds plugins built from its own sources, so
+installing them needs no SDK.
+
 ## Notes
 
+- `GET /health` (same token and network checks) returns `{"ok": true, "busy": ...}`, to check the server is up.
 - Only one build runs at a time; a second request gets HTTP 409.
 - Requests are accepted only from `allowed_networks` (default `192.168.0.0/16` and localhost)
   and must carry the token.
