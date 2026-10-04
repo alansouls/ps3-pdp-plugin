@@ -128,6 +128,8 @@ static sys_ppu_thread_t g_thread;
 static uint32_t g_n_read_done, g_n_read_err, g_n_submit_err, g_n_bad_report;
 static uint32_t g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err;
 static uint32_t g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data, g_n_get_data;
+/* cellPadGetData calls on the guitar's port, and how many of them returned new data (len > 0). */
+static uint32_t g_n_guitar_reads, g_n_guitar_new;
 
 static int32_t ldd_port(void)
 {
@@ -501,6 +503,15 @@ static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 		        g_n_get_data, port_no, ldd_port(), r, r == CELL_OK ? data->len : -1,
 		        r == CELL_OK ? data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] : 0,
 		        r == CELL_OK ? data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] : 0);
+	/* What the game gets from the guitar's port: every new frame at first, then every 100th. */
+	if ((int32_t)port_no == ldd_port()) {
+		g_n_guitar_reads++;
+		if (r == CELL_OK && data->len > 0 && rm_log_every(&g_n_guitar_new, 60, 100))
+			rm_logf("guitar port %u -> game #%u: len %d, digital 0x%04x 0x%04x, right x 0x%02x, sensor x 0x%03x",
+			        port_no, g_n_guitar_new, data->len, data->button[CELL_PAD_BTN_OFFSET_DIGITAL1],
+			        data->button[CELL_PAD_BTN_OFFSET_DIGITAL2], data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X],
+			        data->button[CELL_PAD_BTN_OFFSET_SENSOR_X]);
+	}
 	return r;
 }
 
@@ -516,6 +527,14 @@ static int32_t hook_GetInfo(CellPadInfo *info)
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->vendor_id[port]  = g_profile->vid;
 		info->product_id[port] = g_profile->pid;
+		/* Once the guitar has a port, log what the game sees on every port. */
+		static bool shown;
+		if (!shown) {
+			shown = true;
+			for (int i = 0; i < 4; i++)
+				rm_logf("GetInfo as the game sees it: port %d vid 0x%04x pid 0x%04x status 0x%02x%s", i,
+				        info->vendor_id[i], info->product_id[i], info->status[i], i == port ? "  <- guitar" : "");
+		}
 	}
 	return r;
 }
@@ -532,6 +551,14 @@ static int32_t hook_GetInfo2(CellPadInfo2 *info)
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->device_type[port]       = CELL_PAD_DEV_TYPE_STANDARD;
 		info->device_capability[port] = GUITAR_CAPABILITY;
+		static bool shown;
+		if (!shown) {
+			shown = true;
+			for (int i = 0; i < 4; i++)
+				rm_logf("GetInfo2 as the game sees it: port %d status 0x%x setting 0x%x capability 0x%x type 0x%x%s", i,
+				        info->port_status[i], info->port_setting[i], info->device_capability[i],
+				        info->device_type[i], i == port ? "  <- guitar" : "");
+		}
 	}
 	return r;
 }
@@ -837,10 +864,11 @@ static void log_stats(void)
 {
 	rm_logf("heartbeat: dev %d intr pipe %d ldd %d port %d | reads %u errs %u submit errs %u bad %u | "
 	        "reports %u changes %u inserts %u insert errs %u | hook calls: GetData %u GetInfo %u GetInfo2 %u "
-	        "PeriphInfo %u PeriphData %u",
+	        "PeriphInfo %u PeriphData %u | game reads of the guitar port %u, with new data %u",
 	        g_dev_id, g_intr_pipe, g_ldd, ldd_port(), g_n_read_done, g_n_read_err, g_n_submit_err,
 	        g_n_bad_report, g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err,
-	        g_n_get_data, g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data);
+	        g_n_get_data, g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data,
+	        g_n_guitar_reads, g_n_guitar_new);
 }
 
 static void riff_thread(uint64_t arg)
