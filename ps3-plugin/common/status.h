@@ -24,7 +24,7 @@ typedef struct {
 enum {
 	RIFF_STEP_NONE = 0,
 	RIFF_STEP_MODULE_START,   /* riff_start ran; result 0 = arg came in args, 1 = in argp, 2 = not found */
-	RIFF_STEP_THREAD,         /* riff_thread is running */
+	RIFF_STEP_THREAD,         /* riff_thread is running; result = sys_lwmutex_create */
 	RIFF_STEP_PROFILE,        /* profile selected */
 	RIFF_STEP_IMPORTS,        /* result = number of pad imports hooked */
 	RIFF_STEP_USBD_MODULE,    /* result = cellSysmoduleLoadModule(USBD) */

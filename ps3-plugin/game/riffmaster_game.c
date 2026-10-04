@@ -779,8 +779,14 @@ static void riff_thread(uint64_t arg)
 {
 	(void)arg;
 	mark(__LINE__, 0);
-	rm_logf("riffmaster_game thread started");
-	report(RIFF_STEP_THREAD, 0);
+	rm_logf("riffmaster_game thread started, loader arg %s, loader pid 0x%x, status at 0x%08x, "
+	        "module_start args 0x%x argp 0x%x", g_arg.magic == RIFF_ARG_MAGIC ? "ok" : "missing",
+	        g_arg.vsh_pid, g_arg.status_addr, g_status.start_args, g_status.start_argp);
+	sys_lwmutex_attribute_t attr;
+	sys_lwmutex_attribute_initialize(attr);
+	int lr = sys_lwmutex_create(&g_lock, &attr);
+	rm_logf("sys_lwmutex_create returned 0x%x", lr);
+	report(RIFF_STEP_THREAD, lr);
 
 	rm_logf("selecting profile...");
 	select_profile();
@@ -837,31 +843,28 @@ static bool take_loader_arg(uint32_t addr)
 int riff_start(size_t args, void *argp)
 {
 	/*
-	 * Report to the loader before anything else, so it learns that module_start
-	 * ran even if logging to a file fails or hangs. The loader's argument is
-	 * freed when module_start returns, so keep a copy. Cobra passes it as the
-	 * first parameter (args); argp held 0xc8 on hardware, and reading that
-	 * crashed module_start. Check argp too, but only through take_loader_arg.
+	 * Cobra runs module_start on a thread its kernel code creates, and liblv2
+	 * functions that use per-thread state don't work there: rm_logf stopped
+	 * inside sys_time_get_system_time / sys_ppu_thread_get_id on hardware. So
+	 * only make direct syscalls here (no logging), start riff_thread with
+	 * liblv2's sys_ppu_thread_create, and do everything else there. The
+	 * loader's module_start does the same.
+	 *
+	 * Cobra passes the loader's argument as the first parameter (args); argp
+	 * held 0xc8 on hardware, and reading that crashed module_start. Check argp
+	 * too, but only through take_loader_arg. The argument is freed when
+	 * module_start returns, so keep a copy.
 	 */
 	g_status.start_args = (uint32_t)args;
 	g_status.start_argp = (uint32_t)argp;
-	int where = take_loader_arg((uint32_t)args) ? 0 : take_loader_arg((uint32_t)argp) ? 1 : 2;
-	report(RIFF_STEP_MODULE_START, where);
+	g_status.step   = RIFF_STEP_MODULE_START;
+	g_status.result = take_loader_arg((uint32_t)args) ? 0 : take_loader_arg((uint32_t)argp) ? 1 : 2;
+	push_status();
 
-	rm_logf("riff_start: module_start in pid 0x%x, args 0x%x argp %p", sys_process_getpid(), (unsigned)args, argp);
-	rm_logf("riff_start: loader arg %s, loader pid 0x%x, status at 0x%08x",
-	        g_arg.magic == RIFF_ARG_MAGIC ? "ok" : "missing", g_arg.vsh_pid, g_arg.status_addr);
-	sys_lwmutex_attribute_t attr;
-	sys_lwmutex_attribute_initialize(attr);
-	int r = sys_lwmutex_create(&g_lock, &attr);
-	mark(__LINE__, r);
-	rm_logf("riff_start: sys_lwmutex_create returned 0x%x", r);
 	g_running = true;
-
-	r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
-	                          SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
+	int r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
+	                              SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
 	mark(__LINE__, r);
-	rm_logf("riff_start: sys_ppu_thread_create returned 0x%x, returning RESIDENT", r);
 	return SYS_PRX_RESIDENT;
 }
 
