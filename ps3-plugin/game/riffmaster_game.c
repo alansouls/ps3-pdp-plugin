@@ -113,6 +113,8 @@ static const profile_t *g_profile = &PROFILE_GH;
 
 static sys_lwmutex_t g_lock;
 static rm_state_t    g_state;
+/* Bumped (under g_lock) every time g_state changes in a way the game should see. */
+static volatile uint32_t g_state_seq;
 static int32_t       g_ldd = -1;      /* cellPadLdd handle */
 static volatile bool g_running;
 
@@ -128,8 +130,12 @@ static sys_ppu_thread_t g_thread;
 static uint32_t g_n_read_done, g_n_read_err, g_n_submit_err, g_n_bad_report;
 static uint32_t g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err;
 static uint32_t g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data, g_n_get_data;
-/* cellPadGetData calls on the guitar's port, and how many of them returned new data (len > 0). */
-static uint32_t g_n_guitar_reads, g_n_guitar_new;
+/*
+ * cellPadGetData calls on the guitar's port; how many returned new data from
+ * the pad library (len > 0); how many hook_GetData filled in itself.
+ */
+static uint32_t g_n_guitar_reads, g_n_guitar_lib_new, g_n_guitar_new;
+static uint32_t g_guitar_seen_seq;  /* g_state_seq last handed to the game */
 
 static int32_t ldd_port(void)
 {
@@ -284,6 +290,7 @@ static void handle_report(const uint8_t *r, int32_t len)
 	               prev.btn6 != g_state.btn6 || prev.whammy != g_state.whammy ||
 	               prev.tilted != g_state.tilted ||
 	               (g_state.tilt > RM_TILT_MIN && prev.tilt != g_state.tilt);
+	if (changed) g_state_seq++;
 	rm_state_t snap = g_state;
 	sys_lwmutex_unlock(&g_lock);
 
@@ -503,9 +510,29 @@ static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 		        g_n_get_data, port_no, ldd_port(), r, r == CELL_OK ? data->len : -1,
 		        r == CELL_OK ? data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] : 0,
 		        r == CELL_OK ? data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] : 0);
-	/* What the game gets from the guitar's port: every new frame at first, then every 100th. */
+	/*
+	 * Data inserted with cellPadLddDataInsert never reached the game: every
+	 * read of the guitar's port returned len 0 (GH Metallica, on hardware).
+	 * So when the guitar's state has changed since the game last read it,
+	 * fill in the frame here, the way cellPadGetData reports new data.
+	 */
 	if ((int32_t)port_no == ldd_port()) {
 		g_n_guitar_reads++;
+		if (r == CELL_OK && data->len > 0)
+			g_n_guitar_lib_new++;
+		uint32_t seq = g_state_seq;
+		if (seq != g_guitar_seen_seq) {
+			rm_state_t s;
+			sys_lwmutex_lock(&g_lock, 0);
+			s = g_state;
+			seq = g_state_seq;
+			sys_lwmutex_unlock(&g_lock);
+			build_pad_data(&s, data);
+			g_guitar_seen_seq = seq;
+			r = CELL_OK;
+		} else if (r == CELL_OK) {
+			data->len = 0;
+		}
 		if (r == CELL_OK && data->len > 0 && rm_log_every(&g_n_guitar_new, 60, 100))
 			rm_logf("guitar port %u -> game #%u: len %d, digital 0x%04x 0x%04x, right x 0x%02x, sensor x 0x%03x",
 			        port_no, g_n_guitar_new, data->len, data->button[CELL_PAD_BTN_OFFSET_DIGITAL1],
@@ -864,11 +891,12 @@ static void log_stats(void)
 {
 	rm_logf("heartbeat: dev %d intr pipe %d ldd %d port %d | reads %u errs %u submit errs %u bad %u | "
 	        "reports %u changes %u inserts %u insert errs %u | hook calls: GetData %u GetInfo %u GetInfo2 %u "
-	        "PeriphInfo %u PeriphData %u | game reads of the guitar port %u, with new data %u",
+	        "PeriphInfo %u PeriphData %u | game reads of the guitar port %u, new data from the pad library %u, "
+	        "frames handed to the game %u",
 	        g_dev_id, g_intr_pipe, g_ldd, ldd_port(), g_n_read_done, g_n_read_err, g_n_submit_err,
 	        g_n_bad_report, g_n_reports, g_n_changes, g_n_inserts, g_n_insert_err,
 	        g_n_get_data, g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data,
-	        g_n_guitar_reads, g_n_guitar_new);
+	        g_n_guitar_reads, g_n_guitar_lib_new, g_n_guitar_new);
 }
 
 static void riff_thread(uint64_t arg)

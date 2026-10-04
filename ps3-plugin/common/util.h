@@ -310,7 +310,7 @@ static inline void rm_log_write(const char *line, size_t len)
 /* Appends "[uptime] tag tid: <formatted msg>\n". */
 static inline void rm_logf(const char *fmt, ...)
 {
-	char line[256];
+	char line[512];
 	rm_buf_t b = { line, 0, sizeof(line) - 1 };
 
 	if (!RIFF_LOG_ENABLED())
