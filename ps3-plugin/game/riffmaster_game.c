@@ -24,6 +24,9 @@
 #include <cell/cell_fs.h>
 
 #define RIFF_LOG_TAG "game"
+/* Report how far the first log writes get (see riff_log_probe). */
+static void riff_log_probe(unsigned point);
+#define RIFF_LOG_PROBE(n) riff_log_probe(n)
 #include "../common/util.h"
 
 #ifndef USB_CLASS_HID
@@ -131,19 +134,44 @@ static riff_arg_t    g_arg;     /* from the loader, magic 0 if none was passed *
 /* Initialized, so it lands in .data where the loader can find the signature. */
 static riff_status_t g_status = { { RIFF_STATUS_SIG0, RIFF_STATUS_SIG1 } };
 
-static void report(uint32_t step, int32_t result)
+/* Copies g_status into the loader's memory. Doesn't log, so it works even if logging is broken. */
+static void push_status(void)
 {
 	g_status.seq++;
-	g_status.step    = step;
-	g_status.result  = result;
 	g_status.log_err = rm_log_err;
 	g_status.profile = g_profile == &PROFILE_RB ? 'r' : 'g';
-	if (g_arg.magic != RIFF_ARG_MAGIC)
-		return;
-	int r = ps3mapi_set_proc_mem(g_arg.vsh_pid, g_arg.status_addr, &g_status, sizeof(g_status));
-	g_status.report_err = r;
+	if (g_arg.magic == RIFF_ARG_MAGIC)
+		g_status.report_err = ps3mapi_set_proc_mem(g_arg.vsh_pid, g_arg.status_addr, &g_status, sizeof(g_status));
+}
+
+static void report(uint32_t step, int32_t result)
+{
+	g_status.step   = step;
+	g_status.result = result;
+	push_status();
 	rm_logf("report step %u result 0x%x to loader pid 0x%x at 0x%08x: 0x%x",
-	        step, result, g_arg.vsh_pid, g_arg.status_addr, r);
+	        step, result, g_arg.vsh_pid, g_arg.status_addr, g_status.report_err);
+}
+
+/* Records that startup reached a source line, with a result, for when it stops between reports. */
+static void mark(uint32_t line, int32_t result)
+{
+	g_status.mark_line   = line;
+	g_status.mark_result = result;
+	push_status();
+}
+
+/* Only the first few log lines are probed; each probe costs a PS3MAPI call. */
+#define LOG_PROBE_LINES 3
+static uint32_t g_probed_lines;
+
+static void riff_log_probe(unsigned point)
+{
+	if (g_probed_lines >= LOG_PROBE_LINES) return;
+	g_status.log_probe = point;
+	push_status();
+	if (point == 9 || (point == 5 && rm_log_err != 0))
+		g_probed_lines++;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -750,6 +778,7 @@ static void log_stats(void)
 static void riff_thread(uint64_t arg)
 {
 	(void)arg;
+	mark(__LINE__, 0);
 	rm_logf("riffmaster_game thread started");
 	report(RIFF_STEP_THREAD, 0);
 
@@ -825,11 +854,13 @@ int riff_start(size_t args, void *argp)
 	sys_lwmutex_attribute_t attr;
 	sys_lwmutex_attribute_initialize(attr);
 	int r = sys_lwmutex_create(&g_lock, &attr);
+	mark(__LINE__, r);
 	rm_logf("riff_start: sys_lwmutex_create returned 0x%x", r);
 	g_running = true;
 
 	r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
 	                          SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
+	mark(__LINE__, r);
 	rm_logf("riff_start: sys_ppu_thread_create returned 0x%x, returning RESIDENT", r);
 	return SYS_PRX_RESIDENT;
 }

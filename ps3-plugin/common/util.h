@@ -26,6 +26,14 @@
 #define RIFF_LOG_TAG "?"
 #endif
 
+/*
+ * Called at each step inside rm_logf with a number (1 = entered ... 9 = file
+ * closed). The game plugin defines it to report how far a log write got.
+ */
+#ifndef RIFF_LOG_PROBE
+#define RIFF_LOG_PROBE(n) ((void)0)
+#endif
+
 static inline void rm_memset(void *dst, int v, size_t n)
 {
 	uint8_t *d = (uint8_t *)dst;
@@ -284,7 +292,9 @@ static inline void rm_log_write(const char *line, size_t len)
 {
 	int fd;
 	uint64_t written;
+	RIFF_LOG_PROBE(4);
 	rm_log_err = rm_fs_open(RIFF_LOG_PATH, CELL_FS_O_WRONLY | CELL_FS_O_CREAT | CELL_FS_O_APPEND, &fd);
+	RIFF_LOG_PROBE(5);
 	if (rm_log_err != 0)
 		return;
 	CellFsStat st;
@@ -293,9 +303,13 @@ static inline void rm_log_write(const char *line, size_t len)
 		rm_fs_ftruncate(fd, 0);
 		rm_fs_write(fd, wrap, sizeof(wrap) - 1, &written);
 	}
+	RIFF_LOG_PROBE(6);
 	rm_fs_write(fd, line, len, &written);
+	RIFF_LOG_PROBE(7);
 	rm_fs_fsync(fd);
+	RIFF_LOG_PROBE(8);
 	rm_fs_close(fd);
+	RIFF_LOG_PROBE(9);
 }
 
 /* Appends "[uptime] tag tid: <formatted msg>\n". */
@@ -304,9 +318,11 @@ static inline void rm_logf(const char *fmt, ...)
 	char line[256];
 	rm_buf_t b = { line, 0, sizeof(line) - 1 };
 
+	RIFF_LOG_PROBE(1);
 	uint64_t us = sys_time_get_system_time();
 	sys_ppu_thread_t tid = 0;
 	sys_ppu_thread_get_id(&tid);
+	RIFF_LOG_PROBE(2);
 	rm_format(&b, "[%5llu.%06llu] %-6s t%llx: ", us / 1000000, us % 1000000,
 	          RIFF_LOG_TAG, (unsigned long long)tid);
 
@@ -316,6 +332,7 @@ static inline void rm_logf(const char *fmt, ...)
 	va_end(ap);
 
 	line[b.n++] = '\n';
+	RIFF_LOG_PROBE(3);
 	rm_log_write(line, b.n);
 }
 

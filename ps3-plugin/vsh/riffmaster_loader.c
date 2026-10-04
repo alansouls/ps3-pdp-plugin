@@ -179,8 +179,10 @@ static void check_game_status(void)
 	rm_memcpy(&s, (const void *)&g_game_status, sizeof(s));
 	if (s.seq != g_seen_seq) {
 		g_seen_seq = s.seq;
-		rm_logf("game plugin: step %u (%s), result 0x%x, profile %c, game log open error 0x%x",
-		        s.step, step_name(s.step), s.result, s.profile ? s.profile : '-', s.log_err);
+		rm_logf("game plugin: step %u (%s), result 0x%x, profile %c, game log open error 0x%x, "
+		        "log probe %u, mark line %u result 0x%x",
+		        s.step, step_name(s.step), s.result, s.profile ? s.profile : '-', s.log_err,
+		        s.log_probe, s.mark_line, s.mark_result);
 		if (s.step == RIFF_STEP_READY) {
 			g_report_deadline = 0;
 			const char *guitar = s.profile == 'r' ? "Rock Band" : "Guitar Hero";
@@ -342,9 +344,9 @@ static void peek_game_status(uint32_t pid, int32_t prx_id)
 				riff_status_t st;
 				if (ps3mapi_get_proc_mem(pid, base + off + i * 4, &st, sizeof(st)) != 0) continue;
 				rm_logf("  game plugin status at 0x%08x: seq %u, step %u (%s), result 0x%x, log open error 0x%x,"
-				        " report error 0x%x, module_start args 0x%08x argp 0x%08x",
+				        " report error 0x%x, module_start args 0x%08x argp 0x%08x, log probe %u, mark line %u result 0x%x",
 				        base + off + i * 4, st.seq, st.step, step_name(st.step), st.result, st.log_err,
-				        st.report_err, st.start_args, st.start_argp);
+				        st.report_err, st.start_args, st.start_argp, st.log_probe, st.mark_line, st.mark_result);
 				if (st.seq == 0)
 					rm_logf("  -> module_start never ran (or never reached its first report)");
 				return;

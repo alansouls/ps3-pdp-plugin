@@ -56,6 +56,9 @@ typedef struct {
 	int32_t  report_err;  /* last ps3mapi_set_proc_mem result, 0 if it worked */
 	uint32_t start_args;  /* module_start's args and argp, as received */
 	uint32_t start_argp;
+	uint32_t log_probe;   /* last RIFF_LOG_PROBE point reached inside rm_logf (see util.h) */
+	uint32_t mark_line;   /* source line of the last mark() in the game plugin */
+	int32_t  mark_result; /* result recorded with it */
 } riff_status_t;
 
 #endif
