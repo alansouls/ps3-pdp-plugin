@@ -790,13 +790,22 @@ static void riff_thread(uint64_t arg)
 
 int riff_start(size_t args, void *argp)
 {
-	rm_logf("riff_start: module_start in pid 0x%x, args %u argp %p", sys_process_getpid(), (unsigned)args, argp);
-	/* argp is freed when module_start returns, so keep a copy. */
-	if (argp != NULL && ((const riff_arg_t *)argp)->magic == RIFF_ARG_MAGIC)
-		rm_memcpy(&g_arg, argp, sizeof(g_arg));
+	/*
+	 * Report to the loader before anything else, so it learns that module_start
+	 * ran even if logging to a file fails or hangs. The loader's argument is
+	 * freed when module_start returns, so keep a copy. It should arrive in argp,
+	 * but accept it in args too in case Cobra passes it as the first parameter.
+	 */
+	const riff_arg_t *a = (const riff_arg_t *)argp;
+	if (a == NULL && args >= 0x10000 && (args & 3) == 0)
+		a = (const riff_arg_t *)args;
+	if (a != NULL && a->magic == RIFF_ARG_MAGIC)
+		rm_memcpy(&g_arg, a, sizeof(g_arg));
+	report(RIFF_STEP_MODULE_START, a == (const riff_arg_t *)argp ? 0 : 1);
+
+	rm_logf("riff_start: module_start in pid 0x%x, args 0x%x argp %p", sys_process_getpid(), (unsigned)args, argp);
 	rm_logf("riff_start: loader arg %s, loader pid 0x%x, status at 0x%08x",
 	        g_arg.magic == RIFF_ARG_MAGIC ? "ok" : "missing", g_arg.vsh_pid, g_arg.status_addr);
-	report(RIFF_STEP_MODULE_START, 0);
 	sys_lwmutex_attribute_t attr;
 	sys_lwmutex_attribute_initialize(attr);
 	int r = sys_lwmutex_create(&g_lock, &attr);

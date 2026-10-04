@@ -10,7 +10,12 @@
 
 #define SYSCALL8_OPCODE_PS3MAPI             0x7777
 #define PS3MAPI_OPCODE_SET_PROC_MEM         0x0032
+#define PS3MAPI_OPCODE_GET_ALL_PROC_MODULE_PID 0x0041
+#define PS3MAPI_OPCODE_GET_PROC_MODULE_NAME 0x0042
 #define PS3MAPI_OPCODE_LOAD_PROC_MODULE     0x0044
+
+/* Cobra always copies this many module IDs into the list. */
+#define PS3MAPI_MAX_MODULES 128
 
 /*
  * Don't list processes through PS3MAPI (GET_ALL_PROC_PID / GET_PROC_NAME_BY_PID)
@@ -22,6 +27,22 @@ static inline int ps3mapi_set_proc_mem(uint32_t pid, uint32_t addr, const void *
 {
 	system_call_6(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_SET_PROC_MEM,
 	              (uint64_t)pid, (uint64_t)addr, (uint64_t)(uint32_t)buf, (uint64_t)size);
+	return_to_user_prog(int);
+}
+
+/* Fills ids[PS3MAPI_MAX_MODULES] with the process's module IDs, 0 after the last one. */
+static inline int ps3mapi_get_proc_modules(uint32_t pid, int32_t *ids)
+{
+	system_call_4(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_ALL_PROC_MODULE_PID,
+	              (uint64_t)pid, (uint64_t)(uint32_t)ids);
+	return_to_user_prog(int);
+}
+
+/* Copies the module's name (up to 29 chars, NOT NUL-terminated) into name. */
+static inline int ps3mapi_get_proc_module_name(uint32_t pid, int32_t id, char *name)
+{
+	system_call_5(8, SYSCALL8_OPCODE_PS3MAPI, PS3MAPI_OPCODE_GET_PROC_MODULE_NAME,
+	              (uint64_t)pid, (uint64_t)(uint32_t)id, (uint64_t)(uint32_t)name);
 	return_to_user_prog(int);
 }
 

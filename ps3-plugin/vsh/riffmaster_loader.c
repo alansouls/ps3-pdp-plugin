@@ -151,6 +151,8 @@ static void notify(const char *fmt, ...)
 static volatile riff_status_t g_game_status;
 static uint32_t g_seen_seq;
 static uint64_t g_report_deadline;  /* 0 once setup finished or the timeout was reported */
+static uint32_t g_injected_pid;
+static void log_game_modules(uint32_t pid);
 
 static const char *const STEP_NAMES[RIFF_STEP_COUNT] = {
 	"none", "module_start", "thread started", "profile selected", "imports hooked",
@@ -191,6 +193,7 @@ static void check_game_status(void)
 	}
 	if (g_report_deadline && uptime_sec() >= g_report_deadline) {
 		g_report_deadline = 0;
+		log_game_modules(g_injected_pid);
 		if (s.seq == 0) {
 			rm_logf("game plugin sent no progress report within %ds of injection", REPORT_TIMEOUT_SEC);
 			notify("Riffmaster: guitar plugin didn't report back");
@@ -266,6 +269,31 @@ static void log_game_plugin_file(void)
 		rm_logf("game plugin %s NOT accessible: stat 0x%x", GAME_PLUGIN_PATH, r);
 }
 
+/*
+ * Logs the modules loaded in the game process, to show whether the game plugin
+ * is actually in there. Only runs after injection, when the game is already up.
+ */
+static void log_game_modules(uint32_t pid)
+{
+	static int32_t ids[PS3MAPI_MAX_MODULES];
+	static char name[64];
+	bool found = false;
+
+	rm_memset(ids, 0, sizeof(ids));
+	rm_logf("listing modules in pid 0x%08x: ps3mapi_get_proc_modules...", pid);
+	int r = ps3mapi_get_proc_modules(pid, ids);
+	rm_logf("ps3mapi_get_proc_modules returned 0x%x", r);
+	if (r != 0) return;
+	for (int i = 0; i < PS3MAPI_MAX_MODULES && ids[i]; i++) {
+		rm_memset(name, 0, sizeof(name));
+		r = ps3mapi_get_proc_module_name(pid, ids[i], name);
+		bool ours = r == 0 && rm_memifind(name, rm_strlen(name), "riffmaster");
+		found |= ours;
+		rm_logf("  module 0x%08x name_r 0x%x '%s'%s", ids[i], r, name, ours ? "  <- game plugin" : "");
+	}
+	rm_logf("game plugin %s loaded in the game process", found ? "IS" : "is NOT");
+}
+
 static void inject(uint32_t pid)
 {
 	log_game_plugin_file();
@@ -275,10 +303,12 @@ static void inject(uint32_t pid)
 	        pid, GAME_PLUGIN_PATH, arg.vsh_pid, arg.status_addr);
 	int r = ps3mapi_load_proc_module(pid, GAME_PLUGIN_PATH, &arg, sizeof(arg));
 	rm_logf("ps3mapi_load_proc_module returned %d (0x%x)%s", r, r, r == 0 ? "" : "  <- FAILED");
-	if (r != 0)
+	if (r != 0) {
 		notify("Riffmaster: failed to load guitar plugin (0x%x)", r);
-	else
+	} else {
+		g_injected_pid = pid;
 		g_report_deadline = uptime_sec() + REPORT_TIMEOUT_SEC;
+	}
 	check_game_status();
 }
 
