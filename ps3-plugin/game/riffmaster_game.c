@@ -539,8 +539,11 @@ static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 	/*
 	 * Data inserted with cellPadLddDataInsert never reached the game: every
 	 * read of the guitar's port returned len 0 (GH Metallica, on hardware).
-	 * So when the guitar's state has changed since the game last read it,
-	 * fill in the frame here, the way cellPadGetData reports new data.
+	 * So the frame is filled in here, with the full current state on every
+	 * read. A real guitar's accelerometer jitters, so it always has new data;
+	 * with len 0 ("no change") GH3 deployed star power on its own and neither
+	 * tilt nor Select registered, likely because it read the zeroed buffer
+	 * (sensor X 0 = pointed up) instead of keeping the last frame.
 	 */
 	if ((int32_t)port_no == ldd_port()) {
 		RM_LOG_ONLY(
@@ -548,24 +551,22 @@ static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 			if (r == CELL_OK && data->len > 0)
 				g_n_guitar_lib_new++;
 		)
+		rm_state_t s;
+		sys_lwmutex_lock(&g_lock, 0);
+		s = g_state;
 		uint32_t seq = g_state_seq;
+		sys_lwmutex_unlock(&g_lock);
+		build_pad_data(&s, data);
+		r = CELL_OK;
+		/* Log frames that differ from the last one logged, not every read. */
 		if (seq != g_guitar_seen_seq) {
-			rm_state_t s;
-			sys_lwmutex_lock(&g_lock, 0);
-			s = g_state;
-			seq = g_state_seq;
-			sys_lwmutex_unlock(&g_lock);
-			build_pad_data(&s, data);
 			g_guitar_seen_seq = seq;
-			r = CELL_OK;
-		} else if (r == CELL_OK) {
-			data->len = 0;
+			if (rm_log_every(&g_n_guitar_new, 60, 100))
+				rm_logf("guitar port %u -> game #%u: len %d, digital 0x%04x 0x%04x, right x 0x%02x, sensor x 0x%03x y 0x%03x",
+				        port_no, g_n_guitar_new, data->len, data->button[CELL_PAD_BTN_OFFSET_DIGITAL1],
+				        data->button[CELL_PAD_BTN_OFFSET_DIGITAL2], data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X],
+				        data->button[CELL_PAD_BTN_OFFSET_SENSOR_X], data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y]);
 		}
-		if (r == CELL_OK && data->len > 0 && rm_log_every(&g_n_guitar_new, 60, 100))
-			rm_logf("guitar port %u -> game #%u: len %d, digital 0x%04x 0x%04x, right x 0x%02x, sensor x 0x%03x y 0x%03x",
-			        port_no, g_n_guitar_new, data->len, data->button[CELL_PAD_BTN_OFFSET_DIGITAL1],
-			        data->button[CELL_PAD_BTN_OFFSET_DIGITAL2], data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X],
-			        data->button[CELL_PAD_BTN_OFFSET_SENSOR_X], data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y]);
 	}
 	return r;
 }
