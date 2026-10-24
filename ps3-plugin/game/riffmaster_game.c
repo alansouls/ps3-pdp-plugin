@@ -115,6 +115,8 @@ static const profile_t PROFILE_GH = { "gh", 0x12BA, 0x0100, 0x7F, 0xFF, 0x200, 0
 static const profile_t PROFILE_RB = { "rb", 0x12BA, 0x0200, 0x7F, 0xFF, 0x200, 0x180 };
 
 static const profile_t *g_profile = &PROFILE_GH;
+/* Sensor X sent for level / tilted: the profile's values unless sensor_level / sensor_tilted are in the cfg. */
+static uint16_t g_sensor_level = 0x200, g_sensor_tilted = 0x180;
 
 /* ------------------------------------------------------------------------ */
 /* Shared state                                                              */
@@ -259,7 +261,7 @@ static void build_pad_data(const rm_state_t *s, CellPadData *d)
 	b[CELL_PAD_BTN_OFFSET_PRESS_SQUARE]   = (d2 & CELL_PAD_CTRL_SQUARE)   ? 0xFF : 0;
 	b[CELL_PAD_BTN_OFFSET_PRESS_L1]       = (d2 & CELL_PAD_CTRL_L1)       ? 0xFF : 0;
 
-	b[CELL_PAD_BTN_OFFSET_SENSOR_X] = s->tilted ? g_profile->tilt_full : g_profile->tilt_rest;
+	b[CELL_PAD_BTN_OFFSET_SENSOR_X] = s->tilted ? g_sensor_tilted : g_sensor_level;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 0x200;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 0x200;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_G] = 0x200;
@@ -902,13 +904,28 @@ static void read_cfg_tilt(const char *buf, int n)
 	}
 }
 
+/* sensor_level / sensor_tilted from the cfg (sensor X is 10-bit), or -1 if missing or out of range. */
+static int read_cfg_sensor(const char *buf, int n, const char *key)
+{
+	int v = rm_cfg_int(buf, n, key, -1);
+	if (v > 0x3FF) {
+		rm_logf("%s 0x%x out of range (0-0x3ff), ignored", key, v);
+		return -1;
+	}
+	return v;
+}
+
 static void select_profile(void)
 {
 	static char buf[4096];
 	int n = rm_read_file(CFG_PATH, buf, sizeof(buf));
 	char forced = n > 0 ? read_cfg_profile(buf, n) : 0;
-	if (n > 0)
+	int sensor_level = -1, sensor_tilted = -1;
+	if (n > 0) {
 		read_cfg_tilt(buf, n);
+		sensor_level  = read_cfg_sensor(buf, n, "sensor_level");
+		sensor_tilted = read_cfg_sensor(buf, n, "sensor_tilted");
+	}
 	rm_logf("%s: read %d bytes, forced profile '%c', tilt on at 0x%02x, off at 0x%02x", CFG_PATH, n,
 	        forced ? forced : '-', g_tilt_on, g_tilt_off);
 	if (forced == 'r') {
@@ -922,7 +939,10 @@ static void select_profile(void)
 		rm_logf("%s: read %d bytes, 'rock band' %s", SFO_PATH, n, rb ? "found" : "not found");
 		g_profile = rb ? &PROFILE_RB : &PROFILE_GH;
 	}
-	rm_logf("profile: %s (0x%04x:0x%04x)", g_profile->name, g_profile->vid, g_profile->pid);
+	g_sensor_level  = sensor_level  >= 0 ? (uint16_t)sensor_level  : g_profile->tilt_rest;
+	g_sensor_tilted = sensor_tilted >= 0 ? (uint16_t)sensor_tilted : g_profile->tilt_full;
+	rm_logf("profile: %s (0x%04x:0x%04x), sensor x 0x%03x level / 0x%03x tilted", g_profile->name,
+	        g_profile->vid, g_profile->pid, g_sensor_level, g_sensor_tilted);
 }
 
 /* ------------------------------------------------------------------------ */
