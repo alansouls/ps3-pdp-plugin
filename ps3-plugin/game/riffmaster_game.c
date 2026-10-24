@@ -286,11 +286,14 @@ static void handle_report(const uint8_t *r, int32_t len)
 	if (g_state.tilt >= RM_TILT_ON)       g_state.tilted = true;
 	else if (g_state.tilt <= RM_TILT_OFF) g_state.tilted = false;
 
-	/* Tilt jitters at rest; only push frames the game would see as different. */
+	/*
+	 * Tilt jitters at rest; only push frames the game would see as different.
+	 * Dropping back to rest counts too, or the game keeps the last tilted value.
+	 */
 	bool changed = prev.frets != g_state.frets || prev.hat != g_state.hat ||
 	               prev.btn6 != g_state.btn6 || prev.whammy != g_state.whammy ||
 	               prev.tilted != g_state.tilted ||
-	               (g_state.tilt > RM_TILT_MIN && prev.tilt != g_state.tilt);
+	               ((g_state.tilt > RM_TILT_MIN || prev.tilt > RM_TILT_MIN) && prev.tilt != g_state.tilt);
 	if (changed) g_state_seq++;
 	rm_state_t snap = g_state;
 	sys_lwmutex_unlock(&g_lock);
