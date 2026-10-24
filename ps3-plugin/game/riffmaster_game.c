@@ -696,7 +696,8 @@ static uint32_t original_of(void *hook);
 static int32_t mode_info(void *hook, const char *name, uint32_t port_no)
 {
 	bootstrap();
-	int32_t r = ((pad_mode_info_fn)original_of(hook))(port_no);
+	uint32_t original = original_of(hook);
+	int32_t r = ((pad_mode_info_fn)original)(port_no);
 	if ((int32_t)port_no != ldd_port())
 		return r;
 	rm_logf("%s(guitar port %u): pad library says 0x%x, reporting 1", name, port_no, r);
@@ -706,7 +707,8 @@ static int32_t mode_info(void *hook, const char *name, uint32_t port_no)
 static int32_t mode_set(void *hook, const char *name, uint32_t port_no, uint32_t mode)
 {
 	bootstrap();
-	int32_t r = ((pad_mode_set_fn)original_of(hook))(port_no, mode);
+	uint32_t original = original_of(hook);
+	int32_t r = ((pad_mode_set_fn)original)(port_no, mode);
 	if ((int32_t)port_no != ldd_port())
 		return r;
 	rm_logf("%s(guitar port %u, %u): pad library returned 0x%x, reporting CELL_OK", name, port_no, mode, r);
