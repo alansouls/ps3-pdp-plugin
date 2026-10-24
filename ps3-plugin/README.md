@@ -80,7 +80,7 @@ itself.
 | Strum up / down | D-pad up / down | byte 5 low nibble (hat) `0` / `4` |
 | Start / Select | Start / Select | byte 6 `0x20` / `0x10` |
 | Whammy | Right stick X, `0x7F` at rest to `0xFF` | byte 44 |
-| Tilt | On/off: at `tilt_on` and above (default `0xA0`, released at `tilt_off`, default `0x70`, and below), sensor X goes from `0x200` to `0x180` and Select is pressed | byte 45 |
+| Tilt | On/off: at `tilt_on` and above (default `0xA0`, released at `tilt_off`, default `0x70`, and below), sensor X goes from `0x200` to `0x180`, sensor Y from `0x180` to `0x200`, and Select is pressed | byte 45 |
 | PS button | Not forwarded | byte 7 `0x01` |
 
 A real PS3 Guitar Hero guitar reports Yellow as Square and Blue as Triangle; this was confirmed in GH Metallica.

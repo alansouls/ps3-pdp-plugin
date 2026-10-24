@@ -261,8 +261,15 @@ static void build_pad_data(const rm_state_t *s, CellPadData *d)
 	b[CELL_PAD_BTN_OFFSET_PRESS_SQUARE]   = (d2 & CELL_PAD_CTRL_SQUARE)   ? 0xFF : 0;
 	b[CELL_PAD_BTN_OFFSET_PRESS_L1]       = (d2 & CELL_PAD_CTRL_L1)       ? 0xFF : 0;
 
-	b[CELL_PAD_BTN_OFFSET_SENSOR_X] = s->tilted ? g_sensor_tilted : g_sensor_level;
-	b[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 0x200;
+	uint16_t x = s->tilted ? g_sensor_tilted : g_sensor_level;
+	b[CELL_PAD_BTN_OFFSET_SENSOR_X] = x;
+	/*
+	 * Y must follow X: a constant 0x200 made GH3 see the guitar as always
+	 * tilted (star power deployed on its own, tilting did nothing). Real
+	 * guitars read 0x180 level and 0x200 pointed up; the WoR guitar derives
+	 * Y = X + 0x80 below 0x200, X - 0x80 above (PlasticBand docs).
+	 */
+	b[CELL_PAD_BTN_OFFSET_SENSOR_Y] = x < 0x200 ? x + 0x80 : x - 0x80;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 0x200;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_G] = 0x200;
 }
@@ -555,10 +562,10 @@ static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 			data->len = 0;
 		}
 		if (r == CELL_OK && data->len > 0 && rm_log_every(&g_n_guitar_new, 60, 100))
-			rm_logf("guitar port %u -> game #%u: len %d, digital 0x%04x 0x%04x, right x 0x%02x, sensor x 0x%03x",
+			rm_logf("guitar port %u -> game #%u: len %d, digital 0x%04x 0x%04x, right x 0x%02x, sensor x 0x%03x y 0x%03x",
 			        port_no, g_n_guitar_new, data->len, data->button[CELL_PAD_BTN_OFFSET_DIGITAL1],
 			        data->button[CELL_PAD_BTN_OFFSET_DIGITAL2], data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X],
-			        data->button[CELL_PAD_BTN_OFFSET_SENSOR_X]);
+			        data->button[CELL_PAD_BTN_OFFSET_SENSOR_X], data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y]);
 	}
 	return r;
 }
