@@ -679,6 +679,60 @@ static int32_t hook_PeriphGetData(uint32_t port_no, CellPadPeriphData *data)
 	return CELL_OK;
 }
 
+/*
+ * Sensor and press mode. GH3 (controller setup at 0x4b63bc in the 1.11
+ * executable) only stores the motion sensor values when
+ * cellPadInfoSensorMode(port) returns 1 and cellPadSetSensorMode(port, 1)
+ * succeeds. Without that its tilt input never leaves its initial value, so
+ * the guitar looks tilted all the time: star power deploys as soon as it is
+ * available and neither tilt nor Select registers. A cellPadLdd pad doesn't
+ * get these from the pad library, so report both modes as supported for the
+ * guitar's port and accept turning them on. Other ports go to the library.
+ */
+typedef int32_t (*pad_mode_info_fn)(uint32_t port_no);
+typedef int32_t (*pad_mode_set_fn)(uint32_t port_no, uint32_t mode);
+static uint32_t original_of(void *hook);
+
+static int32_t mode_info(void *hook, const char *name, uint32_t port_no)
+{
+	bootstrap();
+	int32_t r = ((pad_mode_info_fn)original_of(hook))(port_no);
+	if ((int32_t)port_no != ldd_port())
+		return r;
+	rm_logf("%s(guitar port %u): pad library says 0x%x, reporting 1", name, port_no, r);
+	return 1;
+}
+
+static int32_t mode_set(void *hook, const char *name, uint32_t port_no, uint32_t mode)
+{
+	bootstrap();
+	int32_t r = ((pad_mode_set_fn)original_of(hook))(port_no, mode);
+	if ((int32_t)port_no != ldd_port())
+		return r;
+	rm_logf("%s(guitar port %u, %u): pad library returned 0x%x, reporting CELL_OK", name, port_no, mode, r);
+	return CELL_OK;
+}
+
+static int32_t hook_InfoSensorMode(uint32_t port_no)
+{
+	return mode_info((void *)hook_InfoSensorMode, "cellPadInfoSensorMode", port_no);
+}
+
+static int32_t hook_SetSensorMode(uint32_t port_no, uint32_t mode)
+{
+	return mode_set((void *)hook_SetSensorMode, "cellPadSetSensorMode", port_no, mode);
+}
+
+static int32_t hook_InfoPressMode(uint32_t port_no)
+{
+	return mode_info((void *)hook_InfoPressMode, "cellPadInfoPressMode", port_no);
+}
+
+static int32_t hook_SetPressMode(uint32_t port_no, uint32_t mode)
+{
+	return mode_set((void *)hook_SetPressMode, "cellPadSetPressMode", port_no, mode);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Import redirection in the game's main executable                          */
 /* ------------------------------------------------------------------------ */
@@ -733,8 +787,21 @@ static import_hook_t g_hooks[] = {
 	{ 0x4CC9B68D, (void *)hook_PeriphGetInfo,  0, 0 },  /* cellPadPeriphGetInfo */
 	{ 0x8A00F264, (void *)hook_PeriphGetData,  0, 0 },  /* cellPadPeriphGetData */
 	{ 0x8B72CDA1, (void *)hook_GetData,        0, 0 },  /* cellPadGetData: called every frame, starts riff_thread */
+	{ 0x78200559, (void *)hook_InfoSensorMode, 0, 0 },  /* cellPadInfoSensorMode */
+	{ 0xBE5BE3BA, (void *)hook_SetSensorMode,  0, 0 },  /* cellPadSetSensorMode */
+	{ 0x0E2DFAAD, (void *)hook_InfoPressMode,  0, 0 },  /* cellPadInfoPressMode */
+	{ 0xF83F8182, (void *)hook_SetPressMode,   0, 0 },  /* cellPadSetPressMode */
 };
 #define NUM_HOOKS (sizeof(g_hooks) / sizeof(g_hooks[0]))
+
+/* The game's own import a hook replaced (its OPD address), to pass other ports through. */
+static uint32_t original_of(void *hook)
+{
+	for (uint32_t h = 0; h < NUM_HOOKS; h++)
+		if (g_hooks[h].hook == hook)
+			return g_hooks[h].original;
+	return 0;
+}
 
 #ifndef RIFF_NO_LOG
 /* The game's sys_io imports, recorded by patch_imports (which can't log) for riff_thread to log. */
