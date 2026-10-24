@@ -81,11 +81,12 @@ SYS_MODULE_STOP(riff_stop);
  * 0x1D-0x6A and reached 0x8C (GH3, on hardware); deliberate tilts read
  * 0xA1-0xFF. Real PS3 guitars report tilt as a switch, so it is turned into an
  * on/off state with hysteresis, and only that state is sent to the game.
- * tilt_on / tilt_off in riffmaster.cfg override these defaults.
+ * tilt_on / tilt_off in riffmaster.cfg override these defaults; tilt_on=0x100
+ * turns tilt off (readings never reach it).
  */
 #define RM_TILT_ON      0xA0
 #define RM_TILT_OFF     0x70
-static uint8_t g_tilt_on = RM_TILT_ON, g_tilt_off = RM_TILT_OFF;
+static uint16_t g_tilt_on = RM_TILT_ON, g_tilt_off = RM_TILT_OFF;
 
 typedef struct {
 	uint8_t frets;
@@ -312,6 +313,10 @@ static void handle_report(const uint8_t *r, int32_t len)
 	if ((digital && rm_log_every(&g_n_changes, 300, 100)) || prev.tilted != snap.tilted)
 		rm_logf("state #%u: frets 0x%02x hat %x btn6 0x%02x whammy 0x%02x tilt 0x%02x tilted %d",
 		        g_n_changes, snap.frets, snap.hat, snap.btn6, snap.whammy, snap.tilt, snap.tilted);
+	/* Tilt updates ~5 times a second; log every real move (it jitters ~8 at rest) to see how it got tilted. */
+	else if (snap.tilt - prev.tilt >= 0x10 || prev.tilt - snap.tilt >= 0x10)
+		rm_logf("tilt 0x%02x -> 0x%02x (tilted %d, frets 0x%02x hat %x)",
+		        prev.tilt, snap.tilt, snap.tilted, snap.frets, snap.hat);
 
 	if (g_ldd < 0) {
 		rm_logf("registering virtual pad: cellPadLddRegisterController()...");
@@ -884,16 +889,16 @@ static char read_cfg_profile(char *buf, int n)
 	return 0;
 }
 
-/* tilt_on / tilt_off from the cfg; kept at the defaults unless 0 <= off < on <= 0xFF. */
+/* tilt_on / tilt_off from the cfg; kept at the defaults unless 0 <= off < on <= 0x100. */
 static void read_cfg_tilt(const char *buf, int n)
 {
 	int on = rm_cfg_int(buf, n, "tilt_on", RM_TILT_ON);
 	int off = rm_cfg_int(buf, n, "tilt_off", RM_TILT_OFF);
-	if (off >= 0 && off < on && on <= 0xFF) {
-		g_tilt_on  = (uint8_t)on;
-		g_tilt_off = (uint8_t)off;
+	if (off >= 0 && off < on && on <= 0x100) {
+		g_tilt_on  = (uint16_t)on;
+		g_tilt_off = (uint16_t)off;
 	} else {
-		rm_logf("tilt_on 0x%x / tilt_off 0x%x invalid (need 0 <= off < on <= 0xff), using the defaults", on, off);
+		rm_logf("tilt_on 0x%x / tilt_off 0x%x invalid (need 0 <= off < on <= 0x100), using the defaults", on, off);
 	}
 }
 
