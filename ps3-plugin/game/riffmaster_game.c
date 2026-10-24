@@ -264,12 +264,11 @@ static void build_pad_data(const rm_state_t *s, CellPadData *d)
 	uint16_t x = s->tilted ? g_sensor_tilted : g_sensor_level;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_X] = x;
 	/*
-	 * Y must follow X: a constant 0x200 made GH3 see the guitar as always
-	 * tilted (star power deployed on its own, tilting did nothing). Real
-	 * guitars read 0x180 level and 0x200 pointed up; the WoR guitar derives
-	 * Y = X + 0x80 below 0x200, X - 0x80 above (PlasticBand docs).
+	 * Y follows the tilt like real guitars: GH5 and WoR read 0x180 level and
+	 * 0x200 pointed up (PlasticBand docs). Kept separate from X so the X
+	 * values can be changed in the cfg without making Y look tilted.
 	 */
-	b[CELL_PAD_BTN_OFFSET_SENSOR_Y] = x < 0x200 ? x + 0x80 : x - 0x80;
+	b[CELL_PAD_BTN_OFFSET_SENSOR_Y] = s->tilted ? 0x200 : 0x180;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 0x200;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_G] = 0x200;
 }
