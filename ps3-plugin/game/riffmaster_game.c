@@ -77,12 +77,15 @@ SYS_MODULE_STOP(riff_stop);
 #define RM_BTN6_START   0x20
 
 /*
- * Tilt is ~0x1D level to ~0xF2 fully up, and sits around 0x44-0x6A in playing
- * position. Real PS3 guitars report tilt as a switch, so it is turned into an
+ * Tilt is ~0x1D level to ~0xF2 fully up. While playing it moves around
+ * 0x1D-0x6A and reached 0x8C (GH3, on hardware); deliberate tilts read
+ * 0xA1-0xFF. Real PS3 guitars report tilt as a switch, so it is turned into an
  * on/off state with hysteresis, and only that state is sent to the game.
+ * tilt_on / tilt_off in riffmaster.cfg override these defaults.
  */
-#define RM_TILT_ON      0x80
-#define RM_TILT_OFF     0x50
+#define RM_TILT_ON      0xA0
+#define RM_TILT_OFF     0x70
+static uint8_t g_tilt_on = RM_TILT_ON, g_tilt_off = RM_TILT_OFF;
 
 typedef struct {
 	uint8_t frets;
@@ -292,8 +295,8 @@ static void handle_report(const uint8_t *r, int32_t len)
 	g_state.btn6   = r[RM_OFF_BTN6];
 	g_state.whammy = r[RM_OFF_WHAMMY];
 	g_state.tilt   = r[RM_OFF_TILT];
-	if (g_state.tilt >= RM_TILT_ON)       g_state.tilted = true;
-	else if (g_state.tilt <= RM_TILT_OFF) g_state.tilted = false;
+	if (g_state.tilt >= g_tilt_on)       g_state.tilted = true;
+	else if (g_state.tilt <= g_tilt_off) g_state.tilted = false;
 
 	/* Only push frames the game would see as different; the raw tilt jitters. */
 	bool changed = prev.frets != g_state.frets || prev.hat != g_state.hat ||
@@ -881,12 +884,28 @@ static char read_cfg_profile(char *buf, int n)
 	return 0;
 }
 
+/* tilt_on / tilt_off from the cfg; kept at the defaults unless 0 <= off < on <= 0xFF. */
+static void read_cfg_tilt(const char *buf, int n)
+{
+	int on = rm_cfg_int(buf, n, "tilt_on", RM_TILT_ON);
+	int off = rm_cfg_int(buf, n, "tilt_off", RM_TILT_OFF);
+	if (off >= 0 && off < on && on <= 0xFF) {
+		g_tilt_on  = (uint8_t)on;
+		g_tilt_off = (uint8_t)off;
+	} else {
+		rm_logf("tilt_on 0x%x / tilt_off 0x%x invalid (need 0 <= off < on <= 0xff), using the defaults", on, off);
+	}
+}
+
 static void select_profile(void)
 {
 	static char buf[4096];
 	int n = rm_read_file(CFG_PATH, buf, sizeof(buf));
 	char forced = n > 0 ? read_cfg_profile(buf, n) : 0;
-	rm_logf("%s: read %d bytes, forced profile '%c'", CFG_PATH, n, forced ? forced : '-');
+	if (n > 0)
+		read_cfg_tilt(buf, n);
+	rm_logf("%s: read %d bytes, forced profile '%c', tilt on at 0x%02x, off at 0x%02x", CFG_PATH, n,
+	        forced ? forced : '-', g_tilt_on, g_tilt_off);
 	if (forced == 'r') {
 		g_profile = &PROFILE_RB;
 	} else if (forced == 'g') {

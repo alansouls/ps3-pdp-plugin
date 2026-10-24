@@ -48,12 +48,14 @@ into each game itself.
 
 ## Configuration
 
-`/dev_hdd0/plugins/riffmaster.cfg` is optional. `profile` is read each time a game starts. The other settings are
-read when the loader starts at boot, so reboot after changing them. Lines starting with `#` are comments.
+`/dev_hdd0/plugins/riffmaster.cfg` is optional. `profile`, `tilt_on` and `tilt_off` are read each time a game
+starts. The other settings are read when the loader starts at boot, so reboot after changing them. Lines starting
+with `#` are comments.
 
 | Setting | Values | Default |
 | --- | --- | --- |
 | `profile` | `auto`: Rock Band titles (any game whose `PARAM.SFO` contains "Rock Band") get the Rock Band guitar ID `12BA:0200`, every other game the Guitar Hero guitar ID `12BA:0100`. `gh` or `rb`: always use that ID. | `auto` |
+| `tilt_on`, `tilt_off` | Tilt readings from the guitar, decimal or hex (`0x...`): ~`0x1D` level to ~`0xF2` neck straight up. Tilt (star power) turns on at `tilt_on` or above and off at `tilt_off` or below. Raise `tilt_on` if star power goes off while you're just playing. | `0xA0`, `0x70` |
 | `notifications` | `2`: show all XMB notifications. `1`: only show failures. `0`: show none. Every message is written to the log either way. | `2` |
 | `debug_stage` | `0`–`2`: for tracking down a console freeze, see [`ps3-plugin/README.md`](ps3-plugin/README.md#finding-what-freezes-the-console). | `2` (normal) |
 | `trace` | `1`: log every call the loader makes while polling, for the same purpose. | `0` |

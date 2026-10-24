@@ -169,8 +169,9 @@ static inline int rm_read_file(const char *path, void *buf, uint32_t size)
 #define RIFF_CFG_PATH "/dev_hdd0/plugins/riffmaster.cfg"
 
 /*
- * Returns the decimal value of the first "key=<number>" line in a cfg buffer,
- * or def if the key is missing. Lines starting with '#' are comments.
+ * Returns the value of the first "key=<number>" line in a cfg buffer (decimal,
+ * or hex with 0x), or def if the key is missing. Lines starting with '#' are
+ * comments.
  */
 static inline int rm_cfg_int(const char *buf, int n, const char *key, int def)
 {
@@ -181,6 +182,16 @@ static inline int rm_cfg_int(const char *buf, int n, const char *key, int def)
 		if (buf[i] != '#' && (size_t)(end - i) > klen && buf[i + klen] == '=' &&
 		    rm_memifind(buf + i, klen, key)) {
 			int j = i + (int)klen + 1, v = 0;
+			if (j + 2 < end && buf[j] == '0' && rm_lower(buf[j + 1]) == 'x') {
+				int digits = 0;
+				for (j += 2; j < end; j++, digits++) {
+					char c = rm_lower(buf[j]);
+					if (c >= '0' && c <= '9')      v = v * 16 + (c - '0');
+					else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+					else break;
+				}
+				return digits ? v : def;
+			}
 			if (j >= end || buf[j] < '0' || buf[j] > '9') return def;
 			while (j < end && buf[j] >= '0' && buf[j] <= '9') v = v * 10 + (buf[j++] - '0');
 			return v;
