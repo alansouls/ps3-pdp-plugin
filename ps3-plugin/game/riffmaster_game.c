@@ -24,6 +24,7 @@
 #include <cell/cell_fs.h>
 
 #define RIFF_LOG_TAG "game"
+#ifndef RIFF_NO_LOG
 /*
  * module_start runs on a thread created by Cobra's kernel code, where calls into
  * liblv2 never return (seen on hardware: sys_ppu_thread_get_id inside rm_logf,
@@ -35,6 +36,7 @@ static volatile bool g_log_ok;
 static void log_sink(const char *line, size_t len);
 #define RIFF_LOG_ENABLED()       (g_log_ok)
 #define RIFF_LOG_SINK(line, len) log_sink(line, len)
+#endif
 #include "../common/util.h"
 
 #ifndef USB_CLASS_HID
@@ -136,6 +138,7 @@ static uint32_t g_n_get_info, g_n_get_info2, g_n_periph_info, g_n_periph_data, g
  */
 static uint32_t g_n_guitar_reads, g_n_guitar_lib_new, g_n_guitar_new;
 static uint32_t g_guitar_seen_seq;  /* g_state_seq last handed to the game */
+static bool g_first_report_seen;    /* RIFF_STEP_FIRST_REPORT sent */
 
 static int32_t ldd_port(void)
 {
@@ -177,6 +180,7 @@ static void mark(uint32_t line, int32_t result)
 	push_status();
 }
 
+#ifndef RIFF_NO_LOG
 /* ------------------------------------------------------------------------ */
 /* Log buffer (see riff_logbuf_t in common/status.h)                         */
 /* ------------------------------------------------------------------------ */
@@ -195,6 +199,7 @@ static void log_sink(const char *line, size_t len)
 	g_logbuf.write_pos = pos + (uint32_t)len;
 	sys_lwmutex_unlock(&g_log_lock);
 }
+#endif
 
 /* ------------------------------------------------------------------------ */
 /* Mapping                                                                   */
@@ -269,9 +274,11 @@ static void handle_report(const uint8_t *r, int32_t len)
 		}
 		return;
 	}
+	if (!g_first_report_seen) {
+		g_first_report_seen = true;
+		report(RIFF_STEP_FIRST_REPORT, len);
+	}
 	if (rm_log_every(&g_n_reports, 8, 0)) {
-		if (g_n_reports == 1)
-			report(RIFF_STEP_FIRST_REPORT, len);
 		rm_logf("report #%u, len %d", g_n_reports, len);
 		rm_log_hex("  report", r, (size_t)len);
 	}
@@ -317,7 +324,7 @@ static void handle_report(const uint8_t *r, int32_t len)
 		CellPadData data;
 		build_pad_data(&snap, &data);
 		int32_t ins = cellPadLddDataInsert(g_ldd, &data);
-		g_n_inserts++;
+		RM_LOG_ONLY(g_n_inserts++;)
 		if (ins != CELL_OK && rm_log_every(&g_n_insert_err, 10, 200))
 			rm_logf("cellPadLddDataInsert failed 0x%x (failure #%u)", ins, g_n_insert_err);
 	}
@@ -521,9 +528,11 @@ static int32_t hook_GetData(uint32_t port_no, CellPadData *data)
 	 * fill in the frame here, the way cellPadGetData reports new data.
 	 */
 	if ((int32_t)port_no == ldd_port()) {
-		g_n_guitar_reads++;
-		if (r == CELL_OK && data->len > 0)
-			g_n_guitar_lib_new++;
+		RM_LOG_ONLY(
+			g_n_guitar_reads++;
+			if (r == CELL_OK && data->len > 0)
+				g_n_guitar_lib_new++;
+		)
 		uint32_t seq = g_state_seq;
 		if (seq != g_guitar_seen_seq) {
 			rm_state_t s;
@@ -558,6 +567,7 @@ static int32_t hook_GetInfo(CellPadInfo *info)
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->vendor_id[port]  = g_profile->vid;
 		info->product_id[port] = g_profile->pid;
+#ifndef RIFF_NO_LOG
 		/* Once the guitar has a port, log what the game sees on every port. */
 		static bool shown;
 		if (!shown) {
@@ -566,6 +576,7 @@ static int32_t hook_GetInfo(CellPadInfo *info)
 				rm_logf("GetInfo as the game sees it: port %d vid 0x%04x pid 0x%04x status 0x%02x%s", i,
 				        info->vendor_id[i], info->product_id[i], info->status[i], i == port ? "  <- guitar" : "");
 		}
+#endif
 	}
 	return r;
 }
@@ -582,6 +593,7 @@ static int32_t hook_GetInfo2(CellPadInfo2 *info)
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->device_type[port]       = CELL_PAD_DEV_TYPE_STANDARD;
 		info->device_capability[port] = GUITAR_CAPABILITY;
+#ifndef RIFF_NO_LOG
 		static bool shown;
 		if (!shown) {
 			shown = true;
@@ -590,6 +602,7 @@ static int32_t hook_GetInfo2(CellPadInfo2 *info)
 				        info->port_status[i], info->port_setting[i], info->device_capability[i],
 				        info->device_type[i], i == port ? "  <- guitar" : "");
 		}
+#endif
 	}
 	return r;
 }
@@ -704,6 +717,7 @@ static import_hook_t g_hooks[] = {
 };
 #define NUM_HOOKS (sizeof(g_hooks) / sizeof(g_hooks[0]))
 
+#ifndef RIFF_NO_LOG
 /* The game's sys_io imports, recorded by patch_imports (which can't log) for riff_thread to log. */
 #define MAX_GAME_IO 64
 static uint32_t g_game_io[MAX_GAME_IO];
@@ -735,6 +749,7 @@ static const char *io_name(uint32_t nid)
 		if (IO_NAMES[i].nid == nid) return IO_NAMES[i].name;
 	return "?";
 }
+#endif
 
 static void write_u32(uint32_t addr, uint32_t value)
 {
@@ -811,8 +826,10 @@ static int patch_imports(void)
 			const uint32_t *slots = (const uint32_t *)stub->func_table;
 			for (uint16_t f = 0; f < stub->num_func; f++) {
 				rm_logf("    sys_io import %u: nid 0x%08x slot %p -> 0x%08x", f, nids[f], &slots[f], slots[f]);
-				if (g_n_game_io < MAX_GAME_IO)
-					g_game_io[g_n_game_io++] = nids[f];
+				RM_LOG_ONLY(
+					if (g_n_game_io < MAX_GAME_IO)
+						g_game_io[g_n_game_io++] = nids[f];
+				)
 				for (uint32_t h = 0; h < NUM_HOOKS; h++) {
 					if (nids[f] != g_hooks[h].nid || g_hooks[h].slot) continue;
 					g_hooks[h].slot     = (uint32_t)&slots[f];
@@ -919,6 +936,7 @@ static void riff_thread(uint64_t arg)
 	rm_logf("selecting profile...");
 	select_profile();
 	report(RIFF_STEP_PROFILE, 0);
+#ifndef RIFF_NO_LOG
 	/* patch_imports ran in module_start, where logging is off; log what it found. */
 	rm_logf("the game imports %u sys_io functions:", g_n_game_io);
 	for (uint32_t i = 0; i < g_n_game_io; i++)
@@ -928,6 +946,7 @@ static void riff_thread(uint64_t arg)
 		        g_hooks[h].nid, g_hooks[h].slot ? "installed" : "not imported by the game, not hooked",
 		        g_hooks[h].slot, g_hooks[h].original);
 	rm_logf("imports patched: %d of %d", g_patched, (int)NUM_HOOKS);
+#endif
 	report(RIFF_STEP_IMPORTS, g_patched);
 
 	rm_logf("cellSysmoduleLoadModule(USBD)...");
@@ -945,6 +964,11 @@ static void riff_thread(uint64_t arg)
 	report(RIFF_STEP_READY, r);
 	rm_logf("setup done, heartbeat every 2s for 60s, then every 15s");
 
+#ifdef RIFF_NO_LOG
+	/* Nothing left to do here, but riff_stop joins this thread. */
+	while (g_running)
+		sys_timer_usleep(100 * 1000);
+#else
 	/* Heartbeat: shows how long the game process kept running. */
 	uint64_t start = sys_time_get_system_time();
 	uint32_t ticks = 0;
@@ -955,6 +979,7 @@ static void riff_thread(uint64_t arg)
 		if (ticks % (elapsed < 60 ? 20 : 150) == 0)
 			log_stats();
 	}
+#endif
 	rm_logf("riffmaster_game thread exiting");
 	sys_ppu_thread_exit(0);
 }
@@ -975,6 +1000,7 @@ static void bootstrap(void)
 	if (g_boot_state != 0 || !__sync_bool_compare_and_swap(&g_boot_state, 0, 1))
 		return;
 	mark(__LINE__, 0);
+#ifndef RIFF_NO_LOG
 	sys_lwmutex_attribute_t attr;
 	sys_lwmutex_attribute_initialize(attr);
 	int lr = sys_lwmutex_create(&g_log_lock, &attr);
@@ -984,6 +1010,7 @@ static void bootstrap(void)
 		g_status.logbuf_addr = (uint32_t)&g_logbuf;
 		push_status();
 	}
+#endif
 	g_running = true;
 	int r = sys_ppu_thread_create(&g_thread, riff_thread, 0, 1000, 0x4000,
 	                              SYS_PPU_THREAD_CREATE_JOINABLE, "riffmaster_game");
@@ -1037,7 +1064,8 @@ int riff_stop(size_t args, void *argp)
 	g_running = false;
 	sys_ppu_thread_join(g_thread, &exit_code);
 
-	rm_logf("riff_stop: cellUsbdUnregisterExtraLdd returned 0x%x", cellUsbdUnregisterExtraLdd(&g_ldd_ops));
+	int32_t r = cellUsbdUnregisterExtraLdd(&g_ldd_ops);
+	rm_logf("riff_stop: cellUsbdUnregisterExtraLdd returned 0x%x", r);
 	if (g_dev_id >= 0) rm_detach(g_dev_id);
 	if (g_buf) { cellUsbdFreeMemory(g_buf); g_buf = NULL; }
 	unpatch_imports();

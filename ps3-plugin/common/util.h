@@ -5,6 +5,12 @@
  * turn these loops back into memset/memcpy calls.
  *
  * Define RIFF_LOG_TAG before including this header to tag each log line.
+ *
+ * Building with RIFF_NO_LOG (make NO_LOG=1) compiles logging out: rm_logf and
+ * rm_log_hex generate no code (their arguments are not evaluated, so never
+ * pass them anything with a side effect), rm_log_every is constant false, and
+ * code that only exists for the log is left out with RM_LOG_ONLY() or
+ * #ifndef RIFF_NO_LOG.
  */
 #ifndef RIFF_UTIL_H
 #define RIFF_UTIL_H
@@ -285,6 +291,36 @@ static inline void rm_format(rm_buf_t *b, const char *fmt, ...)
 /* Logging                                                                  */
 /* ------------------------------------------------------------------------ */
 
+#ifdef RIFF_NO_LOG
+
+/* Wraps statements that only feed the log, such as stats counters. */
+#define RM_LOG_ONLY(...)
+
+/*
+ * sizeof never evaluates its operand, so these generate no code, but the
+ * arguments still count as used (no unused-variable warnings) and are type-checked.
+ */
+static inline int rm_logf_unused(const char *fmt, ...) { (void)fmt; return 0; }
+static inline int rm_log_hex_unused(const char *label, const void *data, size_t n)
+{
+	(void)label; (void)data; (void)n;
+	return 0;
+}
+#define rm_logf(...)                 ((void)sizeof(rm_logf_unused(__VA_ARGS__)))
+#define rm_log_hex(label, data, n)   ((void)sizeof(rm_log_hex_unused(label, data, n)))
+#define rm_log_rotate()              ((void)0)
+
+/* Takes the counter so it stays referenced, but leaves it alone; calls fold to 0. */
+static inline int rm_log_every(uint32_t *counter, uint32_t first, uint32_t every)
+{
+	(void)counter; (void)first; (void)every;
+	return 0;
+}
+
+#else
+
+#define RM_LOG_ONLY(...) __VA_ARGS__
+
 /*
  * Every line is fsync'd before returning, so it survives the console being
  * powered off right after. That makes logging slow (milliseconds per line),
@@ -361,5 +397,7 @@ static inline void rm_log_rotate(void)
 	rm_fs_unlink(RIFF_LOG_OLD_PATH);
 	rm_fs_rename(RIFF_LOG_PATH, RIFF_LOG_OLD_PATH);
 }
+
+#endif /* RIFF_NO_LOG */
 
 #endif

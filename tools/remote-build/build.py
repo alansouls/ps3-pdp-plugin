@@ -49,6 +49,7 @@ def main():
     ap.add_argument("--push", action="store_true", help="git push the branch before building")
     ap.add_argument("--force", action="store_true", help="rebuild even if the branch tip is already a build commit")
     ap.add_argument("--no-pull", action="store_true", help="don't pull the built binaries afterwards")
+    ap.add_argument("--no-log", action="store_true", help="build with make NO_LOG=1 (all logging compiled out)")
     args = ap.parse_args()
 
     if not os.path.exists(CONFIG_PATH):
@@ -72,7 +73,7 @@ def main():
         sys.exit(f"{branch} has {ahead} unpushed commit(s). Push first or rerun with --push.")
 
     print(f"Building '{branch}' on {cfg['server_host']}:{cfg['port']} ...", flush=True)
-    res = request(cfg, "POST", "/build", {"branch": branch, "force": args.force})
+    res = request(cfg, "POST", "/build", {"branch": branch, "force": args.force, "no_log": args.no_log})
 
     if res.get("log"):
         print(res["log"])

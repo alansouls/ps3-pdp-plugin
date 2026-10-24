@@ -112,6 +112,11 @@ make -C ps3-plugin/game    # -> ps3-plugin/game/riffmaster_game.sprx
 make -C ps3-plugin/vsh     # -> ps3-plugin/vsh/riffmaster_loader.sprx
 ```
 
+To squeeze out the last bit of overhead, `make NO_LOG=1` compiles all logging out of both plugins: no log
+file, no log buffer in the game, no stats counters in the input path. Run `make clean` first when switching
+between the two, and note that with this build there is nothing to troubleshoot with, so keep a normal build
+around for that.
+
 ### With the remote build server
 
 Here the PS3 SDK is installed on a Windows PC, while development happens on a Mac. The remote build server in
@@ -127,6 +132,7 @@ Here the PS3 SDK is installed on a Windows PC, while development happens on a Ma
 ```sh
 python3 tools/remote-build/build.py          # build the current branch (push first)
 python3 tools/remote-build/build.py --push   # push, then build
+python3 tools/remote-build/build.py --no-log # build with make NO_LOG=1
 ```
 
 Requests need a shared token and must come from the LAN. Setup (config, firewall rule, starting the server from

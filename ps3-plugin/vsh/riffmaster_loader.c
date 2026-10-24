@@ -167,10 +167,12 @@ static volatile riff_status_t g_game_status;
 static uint32_t g_seen_seq;
 static uint64_t g_report_deadline;  /* 0 once setup finished or the timeout was reported */
 static uint32_t g_injected_pid;
+#ifndef RIFF_NO_LOG
 static int32_t g_liblv2_id;  /* liblv2's module ID in the game, set by log_game_modules */
 static int32_t log_game_modules(uint32_t pid);
 static void dump_game_imports(uint32_t pid, int32_t prx_id);
 static void peek_game_status(uint32_t pid, int32_t prx_id);
+#endif
 
 static const char *const STEP_NAMES[RIFF_STEP_COUNT] = {
 	"none", "module_start", "thread started", "profile selected", "imports hooked",
@@ -182,16 +184,20 @@ static const char *step_name(uint32_t step)
 	return step < RIFF_STEP_COUNT ? STEP_NAMES[step] : "?";
 }
 
+#ifndef RIFF_NO_LOG
 /* How much of the game plugin's log buffer has been copied to the log file. */
 static uint32_t g_game_log_addr, g_game_log_read;
+#endif
 
 static void reset_game_status(void)
 {
 	rm_memset((void *)&g_game_status, 0, sizeof(g_game_status));
 	g_seen_seq = 0;
 	g_report_deadline = 0;
-	g_game_log_addr = g_game_log_read = 0;
+	RM_LOG_ONLY(g_game_log_addr = g_game_log_read = 0;)
 }
+
+#ifndef RIFF_NO_LOG
 
 /*
  * Copies new lines from the game plugin's log buffer (riff_logbuf_t in its
@@ -226,6 +232,7 @@ static void drain_game_log(uint32_t pid)
 		g_game_log_read += n;
 	}
 }
+#endif
 
 /* Logs new progress from the game plugin and shows the notifications that matter. */
 static void check_game_status(void)
@@ -253,11 +260,13 @@ static void check_game_status(void)
 	}
 	if (g_report_deadline && uptime_sec() >= g_report_deadline) {
 		g_report_deadline = 0;
+#ifndef RIFF_NO_LOG
 		int32_t prx_id = log_game_modules(g_injected_pid);
 		if (prx_id) {
 			peek_game_status(g_injected_pid, prx_id);
 			dump_game_imports(g_injected_pid, prx_id);
 		}
+#endif
 		if (s.seq == 0) {
 			rm_logf("game plugin sent no progress report within %ds of injection", REPORT_TIMEOUT_SEC);
 			notify(NOTIFY_PROBLEM, "Riffmaster: guitar plugin didn't report back");
@@ -327,14 +336,17 @@ static void sleep_while_running(uint32_t seconds)
 
 static void log_game_plugin_file(void)
 {
+#ifndef RIFF_NO_LOG
 	CellFsStat st;
 	int r = rm_fs_stat(GAME_PLUGIN_PATH, &st);
 	if (r == 0)
 		rm_logf("game plugin %s present, %llu bytes", GAME_PLUGIN_PATH, (unsigned long long)st.st_size);
 	else
 		rm_logf("game plugin %s NOT accessible: stat 0x%x", GAME_PLUGIN_PATH, r);
+#endif
 }
 
+#ifndef RIFF_NO_LOG
 /*
  * Logs the modules loaded in the game process, to show whether the game plugin
  * is actually in there. Only runs after injection, when the game is already up.
@@ -538,6 +550,7 @@ static void dump_game_imports(uint32_t pid, int32_t prx_id)
 	}
 	rm_logf("  imports: %u point into liblv2, %u into other libraries, %u UNLINKED", linked, other, unlinked);
 }
+#endif /* RIFF_NO_LOG: game plugin diagnostics */
 
 static void inject(uint32_t pid)
 {
@@ -592,7 +605,7 @@ static void loader_thread(uint64_t arg)
 				announce_pending = false;
 			}
 			check_game_status();
-			drain_game_log(g_injected_pid);
+			RM_LOG_ONLY(drain_game_log(g_injected_pid);)
 
 			if (g_trace) rm_logf("trace: poll #%u", polls);
 			pid = game_pid();

@@ -110,7 +110,7 @@ class Builder:
         self.run(["git", "clean", "-fdx"])
         return self.run(["git", "rev-parse", "--short", "HEAD"])
 
-    def build(self, branch, force=False):
+    def build(self, branch, force=False, no_log=False):
         source = self.prepare_repo(branch)
         subject = self.run(["git", "log", "-1", "--format=%s"])
         self.note(f"Source commit: {source} \"{subject}\"")
@@ -119,7 +119,8 @@ class Builder:
             return {"source_commit": source, "build_commit": None, "pushed": False}
         for d in self.cfg["make_dirs"]:
             self.note(f"Compiling {d}")
-            self.run([self.cfg["make_cmd"], "-C", d], timeout=self.cfg["make_timeout"])
+            make = [self.cfg["make_cmd"], "-C", d] + (["NO_LOG=1"] if no_log else [])
+            self.run(make, timeout=self.cfg["make_timeout"])
 
         missing = [a for a in self.cfg["artifacts"]
                    if not os.path.isfile(os.path.join(self.cfg["repo_dir"], a))]
@@ -137,7 +138,8 @@ class Builder:
             self.note("Binaries unchanged, nothing to commit.")
             return {"source_commit": source, "build_commit": None, "pushed": False}
 
-        self.run(["git", "commit", "-m", f"Build binaries for {source} {BUILD_TAG}"])
+        variant = " without logging" if no_log else ""
+        self.run(["git", "commit", "-m", f"Build binaries for {source}{variant} {BUILD_TAG}"])
         build_commit = self.run(["git", "rev-parse", "--short", "HEAD"])
         self.note(f"Pushing {build_commit} to origin/{branch}")
         self.run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"])
@@ -197,8 +199,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             log("=" * 60)
             log(f"[build] '{branch}' requested by {self.client_address[0]}"
-                f"{' (force)' if req.get('force') else ''}")
-            result = builder.build(branch, bool(req.get("force")))
+                f"{' (force)' if req.get('force') else ''}{' (no log)' if req.get('no_log') else ''}")
+            result = builder.build(branch, bool(req.get("force")), bool(req.get("no_log")))
             log(f"[build] '{branch}' OK in {time.monotonic() - start:.1f}s: {result}")
             self.send_json(200, {"ok": True, "branch": branch, "log": "\n".join(builder.log), **result})
         except BuildError as e:

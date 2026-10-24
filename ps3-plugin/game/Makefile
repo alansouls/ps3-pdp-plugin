@@ -12,6 +12,11 @@ PPU_PRX_TARGET   = riffmaster_game.prx
 PPU_SPRX_TARGET  = riffmaster_game.sprx
 PPU_CFLAGS      += -Os -std=gnu99 -fno-builtin \
                    -ffunction-sections -fdata-sections
+# make NO_LOG=1: compile all logging out (no log file, no log buffer, no counters).
+# Run make clean first when switching, the objects don't track this flag.
+ifdef NO_LOG
+PPU_CFLAGS      += -DRIFF_NO_LOG
+endif
 PPU_PRX_LDFLAGS += -Wl,--strip-unused-data
 PPU_PRX_LDLIBS  += -lio_stub -lusbd_stub -lfs_stub -lsysmodule_stub
 

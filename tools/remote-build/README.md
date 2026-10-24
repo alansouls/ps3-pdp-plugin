@@ -42,7 +42,8 @@ python3 tools/remote-build/build.py --push    # push local commits first, then b
 ```
 
 Other flags: `--branch NAME`, `--force` (rebuild even if the branch tip is already a build
-commit), `--no-pull` (don't pull the binaries afterwards).
+commit), `--no-pull` (don't pull the binaries afterwards), `--no-log` (build with `make NO_LOG=1`, all
+logging compiled out; add `--force` to rebuild a tip that already has a normal build).
 
 ## Why it exists
 
