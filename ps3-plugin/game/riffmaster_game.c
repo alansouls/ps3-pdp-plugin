@@ -76,9 +76,12 @@ SYS_MODULE_STOP(riff_stop);
 #define RM_BTN6_SELECT  0x10
 #define RM_BTN6_START   0x20
 
-#define RM_TILT_MIN     0x40  /* readings at or below this count as level (rest drifts to ~0x33) */
-#define RM_TILT_MAX     0xE8  /* readings at or above this count as fully tilted */
-#define RM_TILT_ON      0x80  /* hysteresis for the digital star-power output */
+/*
+ * Tilt is ~0x1D level to ~0xF2 fully up, and sits around 0x44-0x6A in playing
+ * position. Real PS3 guitars report tilt as a switch, so it is turned into an
+ * on/off state with hysteresis, and only that state is sent to the game.
+ */
+#define RM_TILT_ON      0x80
 #define RM_TILT_OFF     0x50
 
 typedef struct {
@@ -99,7 +102,7 @@ typedef struct {
 	uint16_t vid, pid;
 	/* Right stick X range the game expects for the whammy bar. */
 	uint8_t  whammy_rest, whammy_full;
-	/* SIXAXIS-style sensor X range for tilt (0x200 = level). */
+	/* SIXAXIS-style sensor X values for level and tilted (0x200 = level). */
 	uint16_t tilt_rest, tilt_full;
 } profile_t;
 
@@ -252,8 +255,7 @@ static void build_pad_data(const rm_state_t *s, CellPadData *d)
 	b[CELL_PAD_BTN_OFFSET_PRESS_SQUARE]   = (d2 & CELL_PAD_CTRL_SQUARE)   ? 0xFF : 0;
 	b[CELL_PAD_BTN_OFFSET_PRESS_L1]       = (d2 & CELL_PAD_CTRL_L1)       ? 0xFF : 0;
 
-	b[CELL_PAD_BTN_OFFSET_SENSOR_X] =
-		scale(s->tilt, RM_TILT_MIN, RM_TILT_MAX, g_profile->tilt_rest, g_profile->tilt_full);
+	b[CELL_PAD_BTN_OFFSET_SENSOR_X] = s->tilted ? g_profile->tilt_full : g_profile->tilt_rest;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 0x200;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 0x200;
 	b[CELL_PAD_BTN_OFFSET_SENSOR_G] = 0x200;
@@ -293,22 +295,18 @@ static void handle_report(const uint8_t *r, int32_t len)
 	if (g_state.tilt >= RM_TILT_ON)       g_state.tilted = true;
 	else if (g_state.tilt <= RM_TILT_OFF) g_state.tilted = false;
 
-	/*
-	 * Tilt jitters at rest; only push frames the game would see as different.
-	 * Dropping back to rest counts too, or the game keeps the last tilted value.
-	 */
+	/* Only push frames the game would see as different; the raw tilt jitters. */
 	bool changed = prev.frets != g_state.frets || prev.hat != g_state.hat ||
 	               prev.btn6 != g_state.btn6 || prev.whammy != g_state.whammy ||
-	               prev.tilted != g_state.tilted ||
-	               ((g_state.tilt > RM_TILT_MIN || prev.tilt > RM_TILT_MIN) && prev.tilt != g_state.tilt);
+	               prev.tilted != g_state.tilted;
 	if (changed) g_state_seq++;
 	rm_state_t snap = g_state;
 	sys_lwmutex_unlock(&g_lock);
 
-	/* Analog jitter is skipped here so the log tracks button presses. */
+	/* Analog jitter is skipped here so the log tracks button presses; tilt on/off is always logged. */
 	bool digital = prev.frets != snap.frets || prev.hat != snap.hat ||
 	               prev.btn6 != snap.btn6 || prev.tilted != snap.tilted;
-	if (digital && rm_log_every(&g_n_changes, 300, 100))
+	if ((digital && rm_log_every(&g_n_changes, 300, 100)) || prev.tilted != snap.tilted)
 		rm_logf("state #%u: frets 0x%02x hat %x btn6 0x%02x whammy 0x%02x tilt 0x%02x tilted %d",
 		        g_n_changes, snap.frets, snap.hat, snap.btn6, snap.whammy, snap.tilt, snap.tilted);
 
@@ -656,7 +654,7 @@ static int32_t hook_PeriphGetData(uint32_t port_no, CellPadPeriphData *data)
 	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_STRUM_UP]   = strum_up(s.hat)   ? 0xFF : 0;
 	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_STRUM_DOWN] = strum_down(s.hat) ? 0xFF : 0;
 	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_WHAMMYBAR]  = s.whammy;
-	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_TILT_SENS]  = scale(s.tilt, RM_TILT_MIN, RM_TILT_MAX, 0x00, 0xFF);
+	b[CELL_PAD_PCLASS_BTN_OFFSET_GUITAR_TILT_SENS]  = s.tilted ? 0xFF : 0;
 	return CELL_OK;
 }
 

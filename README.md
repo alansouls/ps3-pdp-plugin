@@ -70,7 +70,7 @@ Guitar Hero ID, but if one doesn't react to the guitar, set `profile=gh`.
 | Strum up / down | D-pad up / down |
 | Start / Select | Start / Select |
 | Whammy | Right stick X |
-| Tilt | Motion sensor X. Tilting past the threshold also presses Select, which deploys star power or overdrive. |
+| Tilt | On/off, like a real PS3 guitar's tilt switch: tilting past the threshold sets motion sensor X to tilted and presses Select, which deploys star power or overdrive. |
 | PS button | Not forwarded |
 
 ## How it works
