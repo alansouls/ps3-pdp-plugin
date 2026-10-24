@@ -224,6 +224,8 @@ static void build_pad_data(const rm_state_t *s, CellPadData *d)
 {
 	rm_memset(d, 0, sizeof(*d));
 	d->len = 24;
+	/* Header word as libpad fills it (per RPCS3): bits 7-4 = 0x7, bits 3-0 = len / 2. */
+	d->button[1] = 0x70 | (d->len / 2);
 
 	uint16_t d1 = 0, d2 = 0;
 	if (strum_up(s->hat))               d1 |= CELL_PAD_CTRL_UP;
@@ -578,6 +580,12 @@ static int32_t hook_GetInfo(CellPadInfo *info)
 	if (r == CELL_OK && port >= 0 && port < CELL_PAD_MAX_PORT_NUM) {
 		info->vendor_id[port]  = g_profile->vid;
 		info->product_id[port] = g_profile->pid;
+		/*
+		 * Pads registered with cellPadLdd report status 0x05: connected plus
+		 * 0x04, which a real guitar (and RPCS3) doesn't set. GH3 is the only
+		 * game here using this old call, so report the guitar like a real one.
+		 */
+		info->status[port] &= ~0x04;
 #ifndef RIFF_NO_LOG
 		/* Once the guitar has a port, log what the game sees on every port. */
 		static bool shown;
